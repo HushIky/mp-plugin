@@ -2,11 +2,10 @@ import json
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-from app.core.event import eventmanager
+from app.core.event import Event, eventmanager
+from app.log import logger
 from app.plugins import _PluginBase
-from app.runtime.events import Event
 from app.schemas.types import EventType
-from app.sdk.logging import logger
 
 
 class SiteSpeedLimit(_PluginBase):
