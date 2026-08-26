@@ -1,0 +1,15 @@
+{
+  "SiteSpeedLimit": {
+    "name": "站点限速与分享率控制",
+    "description": "添加下载任务时，根据种子所属站点自动设置最大上传速度、最大分享率及做种时间限制。",
+    "labels": "下载管理",
+    "version": "1.0.0",
+    "icon": "sitespeedlimit.png",
+    "author": "local",
+    "level": 1,
+    "system_version": ">=2.12.0",
+    "history": {
+      "v1.0.0": "初始版本：支持按站点自定义最大上传速度(KB/s)、分享率和做种时间"
+    }
+  }
+}
