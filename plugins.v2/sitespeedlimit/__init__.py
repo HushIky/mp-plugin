@@ -15,7 +15,7 @@ class SiteSpeedLimit(_PluginBase):
     plugin_name = "站点限速与分享率控制"
     plugin_desc = "添加下载任务时，根据种子所属站点自动设置最大上传速度、最大分享率及做种时间。"
     plugin_icon = "sitespeedlimit.png"
-    plugin_version = "1.0.0"
+    plugin_version = "1.0.1"
     plugin_label = "下载管理"
     plugin_author = "local"
     plugin_order = 100
