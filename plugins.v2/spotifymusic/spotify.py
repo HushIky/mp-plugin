@@ -112,12 +112,12 @@ def resolve_spotify_entity(url: str, proxy: Optional[str] = None) -> Dict[str, A
 def _format_track(entity: Dict[str, Any], spotify_id: str) -> Dict[str, Any]:
     """格式化单曲。"""
     artists = [
-        a.get('name', '')
+        a.get('name', '').strip()
         for a in (entity.get('artists') or [])
         if isinstance(a, dict) and a.get('name')
     ]
     if not artists and entity.get('artist'):
-        artists = [str(entity.get('artist'))]
+        artists = [str(entity.get('artist')).strip()]
 
     cover_url = ''
     cover_art = entity.get('coverArt') or {}
@@ -127,27 +127,40 @@ def _format_track(entity: Dict[str, Any], spotify_id: str) -> Dict[str, Any]:
             cover_url = sources[0].get('url', '')
 
     album_name = ''
+    album_artists: List[str] = []
     album_obj = entity.get('album')
     if isinstance(album_obj, dict):
         album_name = album_obj.get('name', '')
+        album_artists = [
+            a.get('name', '').strip()
+            for a in (album_obj.get('artists') or [])
+            if isinstance(a, dict) and a.get('name')
+        ]
+    if not album_artists:
+        album_artists = list(artists)
 
     duration_ms = entity.get('duration') or 0
     duration_sec = int(duration_ms / 1000) if duration_ms else 0
 
     release_date = str(entity.get('releaseDate') or '')
+    artist_str = ', '.join(artists) if artists else 'Unknown Artist'
+    album_artist_str = ', '.join(album_artists) if album_artists else artist_str
 
     track_data = {
         'type': 'track',
         'spotify_id': spotify_id,
         'title': entity.get('name') or entity.get('title', 'Unknown Track'),
         'artists': artists,
-        'artist': ' / '.join(artists) if artists else 'Unknown Artist',
+        'artist': artist_str,
+        'album_artists': album_artists,
+        'album_artist': album_artist_str,
         'album': album_name or entity.get('name', ''),
         'cover_url': cover_url,
         'duration': duration_sec,
         'release_date': release_date,
         'track_number': entity.get('trackNumber') or 1,
         'disc_number': entity.get('discNumber') or 1,
+        'total_tracks': 1,
         'url': f'https://open.spotify.com/track/{spotify_id}',
     }
     return {
@@ -165,10 +178,12 @@ def _format_album(entity: Dict[str, Any], spotify_id: str) -> Dict[str, Any]:
     """格式化专辑。"""
     album_name = entity.get('name') or entity.get('title', 'Unknown Album')
     artists = [
-        a.get('name', '')
+        a.get('name', '').strip()
         for a in (entity.get('artists') or [])
         if isinstance(a, dict) and a.get('name')
     ]
+    album_artist_str = ', '.join(artists) if artists else 'Unknown Artist'
+
     cover_url = ''
     cover_art = entity.get('coverArt') or {}
     if isinstance(cover_art, dict) and cover_art.get('sources'):
@@ -180,16 +195,19 @@ def _format_album(entity: Dict[str, Any], spotify_id: str) -> Dict[str, Any]:
     if not raw_tracks and isinstance(entity.get('tracks'), dict):
         raw_tracks = entity['tracks'].get('items') or []
 
+    total_tracks_count = len(raw_tracks)
     tracks: List[Dict[str, Any]] = []
     for idx, item in enumerate(raw_tracks, 1):
         if not isinstance(item, dict):
             continue
         t_id = item.get('id') or item.get('uri', '').split(':')[-1] or f'{spotify_id}_{idx}'
         t_artists = [
-            a.get('name', '')
+            a.get('name', '').strip()
             for a in (item.get('artists') or [])
             if isinstance(a, dict) and a.get('name')
-        ] or artists
+        ] or list(artists)
+        t_artist_str = ', '.join(t_artists) if t_artists else album_artist_str
+
         dur_ms = item.get('duration') or item.get('duration_ms') or 0
         dur_sec = int(dur_ms / 1000) if dur_ms else 0
 
@@ -198,12 +216,15 @@ def _format_album(entity: Dict[str, Any], spotify_id: str) -> Dict[str, Any]:
             'spotify_id': t_id,
             'title': item.get('title') or item.get('name', f'Track {idx}'),
             'artists': t_artists,
-            'artist': ' / '.join(t_artists) if t_artists else 'Unknown Artist',
+            'artist': t_artist_str,
+            'album_artists': artists,
+            'album_artist': album_artist_str,
             'album': album_name,
             'cover_url': cover_url,
             'duration': dur_sec,
             'track_number': item.get('trackNumber') or idx,
             'disc_number': item.get('discNumber') or 1,
+            'total_tracks': total_tracks_count,
             'release_date': str(entity.get('releaseDate') or ''),
             'url': f'https://open.spotify.com/track/{t_id}',
         })
@@ -212,7 +233,8 @@ def _format_album(entity: Dict[str, Any], spotify_id: str) -> Dict[str, Any]:
         'type': 'album',
         'spotify_id': spotify_id,
         'name': album_name,
-        'artist': ' / '.join(artists),
+        'artist': album_artist_str,
+        'album_artist': album_artist_str,
         'cover_url': cover_url,
         'tracks': tracks,
         'total_tracks': len(tracks),
@@ -240,10 +262,21 @@ def _format_playlist(entity: Dict[str, Any], spotify_id: str) -> Dict[str, Any]:
             continue
         t_id = item.get('id') or item.get('uri', '').split(':')[-1] or f'{spotify_id}_{idx}'
         t_artists = [
-            a.get('name', '')
+            a.get('name', '').strip()
             for a in (item.get('artists') or [])
             if isinstance(a, dict) and a.get('name')
         ]
+        t_artist_str = ', '.join(t_artists) if t_artists else 'Unknown Artist'
+
+        album_obj = item.get('album', {}) if isinstance(item.get('album'), dict) else {}
+        album_name = album_obj.get('name', '')
+        album_artists = [
+            a.get('name', '').strip()
+            for a in (album_obj.get('artists') or [])
+            if isinstance(a, dict) and a.get('name')
+        ]
+        album_artist_str = ', '.join(album_artists) if album_artists else t_artist_str
+
         dur_ms = item.get('duration') or item.get('duration_ms') or 0
         dur_sec = int(dur_ms / 1000) if dur_ms else 0
 
@@ -252,8 +285,10 @@ def _format_playlist(entity: Dict[str, Any], spotify_id: str) -> Dict[str, Any]:
             'spotify_id': t_id,
             'title': item.get('title') or item.get('name', f'Track {idx}'),
             'artists': t_artists,
-            'artist': ' / '.join(t_artists) if t_artists else 'Unknown Artist',
-            'album': item.get('album', {}).get('name', '') if isinstance(item.get('album'), dict) else '',
+            'artist': t_artist_str,
+            'album_artists': album_artists,
+            'album_artist': album_artist_str,
+            'album': album_name,
             'cover_url': cover_url,
             'duration': dur_sec,
             'track_number': item.get('trackNumber') or idx,
@@ -270,6 +305,7 @@ def _format_playlist(entity: Dict[str, Any], spotify_id: str) -> Dict[str, Any]:
         'total_tracks': len(tracks),
         'url': f'https://open.spotify.com/playlist/{spotify_id}',
     }
+
 
 
 def _format_artist(entity: Dict[str, Any], spotify_id: str, proxy: Optional[str] = None) -> Dict[str, Any]:

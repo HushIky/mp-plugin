@@ -58,6 +58,31 @@ def sanitize_filename(text: str) -> str:
     return safe or 'unknown'
 
 
+def format_multi_artists(val: Any) -> str:
+    """
+    将艺术家 / 专辑艺术家格式化为以英文逗号加空格 ', ' 分隔的标准字符串。
+    
+    支持传入 list[str]、tuple、单个字符串（自动拆分兼容的 ' / ' 或 ';' 并重新拼接为 ', '）。
+    """
+    if not val:
+        return ""
+    if isinstance(val, (list, tuple, set)):
+        cleaned = [str(a).strip() for a in val if a and str(a).strip()]
+        return ", ".join(cleaned)
+    if isinstance(val, str):
+        val = val.strip()
+        if not val:
+            return ""
+        if " / " in val:
+            parts = [p.strip() for p in val.split(" / ") if p.strip()]
+            return ", ".join(parts)
+        if ";" in val:
+            parts = [p.strip() for p in val.split(";") if p.strip()]
+            return ", ".join(parts)
+        return val
+    return str(val).strip()
+
+
 class MusicDownloader:
     """封装 yt-dlp 下载与 mutagen 标签加工的下载引擎。"""
 
@@ -96,11 +121,12 @@ class MusicDownloader:
         :param progress_callback: 进度回调 (percentage, status_text)
         :return: (音频文件路径, 歌词文件路径)
         """
-        title = track_info.get("title") or track_info.get("name") or "Unknown Title"
-        artist = track_info.get("artist") or ", ".join(track_info.get("artists") or []) or "Unknown Artist"
-        album = track_info.get("album") or ""
+        title = str(track_info.get("title") or track_info.get("name") or "Unknown Title").strip()
+        artists_raw = track_info.get("artists")
+        artist = format_multi_artists(artists_raw) or format_multi_artists(track_info.get("artist")) or "Unknown Artist"
+        album = str(track_info.get("album") or "").strip()
         duration = int(track_info.get("duration") or 0)
-        cover_url = track_info.get("cover_url") or ""
+        cover_url = str(track_info.get("cover_url") or "").strip()
         youtube_id = track_info.get("youtube_id")
 
         if progress_callback:
@@ -222,7 +248,7 @@ class MusicDownloader:
                 except Exception as e:
                     logger.debug(f"保存 .lrc 文件失败: {e}")
 
-        # 5. 使用 mutagen 注入 ID3 / FLAC / MP4 标签
+        # 5. 使用 mutagen 注入 ID3 / FLAC / MP4 / OGG 标签
         self._tag_audio_file(
             audio_path=audio_file,
             track_info=track_info,
@@ -244,13 +270,19 @@ class MusicDownloader:
     ) -> None:
         """根据音频格式执行具体的元数据打标。"""
         ext = audio_path.suffix.lower()
-        title = str(track_info.get("title") or track_info.get("name") or "")
-        artists = track_info.get("artists") or []
-        artist = str(track_info.get("artist") or ", ".join(artists) or "")
-        album = str(track_info.get("album") or "")
+        title = str(track_info.get("title") or track_info.get("name") or "").strip()
+        
+        # 艺术家与专辑艺术家统一使用逗号+空格 ', ' 格式化
+        artist = format_multi_artists(track_info.get("artists") or track_info.get("artist")) or "Unknown Artist"
+        album_artist = format_multi_artists(
+            track_info.get("album_artists") or track_info.get("album_artist") or track_info.get("albumartist")
+        ) or artist
+
+        album = str(track_info.get("album") or "").strip()
         track_num = int(track_info.get("track_number") or 1)
+        total_tracks = int(track_info.get("total_tracks") or 0)
         disc_num = int(track_info.get("disc_number") or 1)
-        release_date = str(track_info.get("release_date") or "")
+        release_date = str(track_info.get("release_date") or "").strip()
         year = release_date[:4] if len(release_date) >= 4 else ""
 
         lyrics_text = ""
@@ -260,69 +292,114 @@ class MusicDownloader:
         try:
             if ext == '.mp3':
                 self._tag_mp3(
-                    audio_path, title, artist, album, track_num, disc_num, year, release_date,
-                    cover_bytes, lyrics_text
+                    audio_path, title, artist, album_artist, album, track_num, total_tracks,
+                    disc_num, year, release_date, cover_bytes, lyrics_text
                 )
             elif ext == '.flac':
                 self._tag_flac(
-                    audio_path, title, artist, album, track_num, disc_num, year, release_date,
-                    cover_bytes, lyrics_text
+                    audio_path, title, artist, album_artist, album, track_num, total_tracks,
+                    disc_num, year, release_date, cover_bytes, lyrics_text
                 )
             elif ext in ('.m4a', '.mp4', '.aac'):
                 self._tag_mp4(
-                    audio_path, title, artist, album, track_num, disc_num, year,
-                    cover_bytes, lyrics_text
+                    audio_path, title, artist, album_artist, album, track_num, total_tracks,
+                    disc_num, year, cover_bytes, lyrics_text
                 )
             elif ext in ('.opus', '.ogg'):
                 self._tag_ogg(
-                    audio_path, title, artist, album, track_num, disc_num, year,
-                    cover_bytes, lyrics_text
+                    audio_path, title, artist, album_artist, album, track_num, total_tracks,
+                    disc_num, year, cover_bytes, lyrics_text
                 )
         except Exception as e:
             logger.warning(f"为文件 {audio_path.name} 打标失败: {e}")
 
     @staticmethod
-    def _tag_mp3(path: Path, title: str, artist: str, album: str, track: int, disc: int,
-                 year: str, date: str, cover: Optional[bytes], lyrics: str) -> None:
-        audio = MP3(str(path))
-        if audio.tags is None:
-            audio.add_tags()
-        tags: ID3 = audio.tags
+    def _tag_mp3(
+        path: Path,
+        title: str,
+        artist: str,
+        album_artist: str,
+        album: str,
+        track: int,
+        total_tracks: int,
+        disc: int,
+        year: str,
+        date: str,
+        cover: Optional[bytes],
+        lyrics: str,
+    ) -> None:
+        try:
+            audio = MP3(str(path))
+            if audio.tags is None:
+                audio.add_tags()
+            tags: ID3 = audio.tags
+        except Exception:
+            try:
+                tags = ID3(str(path))
+            except Exception:
+                tags = ID3()
+            audio = None
 
         tags.add(TIT2(encoding=3, text=title))
         tags.add(TPE1(encoding=3, text=artist))
-        tags.add(TPE2(encoding=3, text=artist))
+        if album_artist:
+            tags.add(TPE2(encoding=3, text=album_artist))
         if album:
             tags.add(TALB(encoding=3, text=album))
-        tags.add(TRCK(encoding=3, text=f"{track}"))
+        track_str = f"{track}/{total_tracks}" if total_tracks > 0 else f"{track}"
+        tags.add(TRCK(encoding=3, text=track_str))
         tags.add(TPOS(encoding=3, text=f"{disc}"))
-        if year:
+        if date or year:
             tags.add(TDRC(encoding=3, text=date or year))
         if cover:
-            tags.add(APIC(encoding=3, mime='image/jpeg', type=3, desc='Cover', data=cover))
+            mime = 'image/png' if cover.startswith(b'\x89PNG') else 'image/jpeg'
+            tags.add(APIC(encoding=3, mime=mime, type=3, desc='Cover', data=cover))
         if lyrics:
             tags.add(USLT(encoding=3, lang='eng', desc='', text=lyrics))
-        audio.save()
+
+        if audio is not None:
+            audio.save()
+        else:
+            tags.save(str(path))
+
 
     @staticmethod
-    def _tag_flac(path: Path, title: str, artist: str, album: str, track: int, disc: int,
-                  year: str, date: str, cover: Optional[bytes], lyrics: str) -> None:
+    def _tag_flac(
+        path: Path,
+        title: str,
+        artist: str,
+        album_artist: str,
+        album: str,
+        track: int,
+        total_tracks: int,
+        disc: int,
+        year: str,
+        date: str,
+        cover: Optional[bytes],
+        lyrics: str,
+    ) -> None:
         audio = FLAC(str(path))
         audio['title'] = title
         audio['artist'] = artist
-        audio['albumartist'] = artist
+        if album_artist:
+            audio['albumartist'] = album_artist
+            audio['album_artist'] = album_artist
         if album:
             audio['album'] = album
         audio['tracknumber'] = str(track)
+        if total_tracks > 0:
+            audio['totaltracks'] = str(total_tracks)
+            audio['tracktotal'] = str(total_tracks)
         audio['discnumber'] = str(disc)
         if date or year:
             audio['date'] = date or year
         if lyrics:
             audio['lyrics'] = lyrics
+            audio['unsyncedlyrics'] = lyrics
         if cover:
             pic = Picture()
             pic.type = 3
-            pic.mime = 'image/jpeg'
+            pic.mime = 'image/png' if cover.startswith(b'\x89PNG') else 'image/jpeg'
             pic.desc = 'Cover'
             pic.data = cover
             audio.clear_pictures()
@@ -330,40 +407,79 @@ class MusicDownloader:
         audio.save()
 
     @staticmethod
-    def _tag_mp4(path: Path, title: str, artist: str, album: str, track: int, disc: int,
-                 year: str, cover: Optional[bytes], lyrics: str) -> None:
+    def _tag_mp4(
+        path: Path,
+        title: str,
+        artist: str,
+        album_artist: str,
+        album: str,
+        track: int,
+        total_tracks: int,
+        disc: int,
+        year: str,
+        cover: Optional[bytes],
+        lyrics: str,
+    ) -> None:
         audio = MP4(str(path))
         audio['\xa9nam'] = [title]
         audio['\xa9ART'] = [artist]
-        audio['aART'] = [artist]
+        if album_artist:
+            audio['aART'] = [album_artist]
         if album:
             audio['\xa9alb'] = [album]
-        audio['trkn'] = [(track, 0)]
+        audio['trkn'] = [(track, total_tracks if total_tracks > 0 else 0)]
         audio['disk'] = [(disc, 0)]
         if year:
             audio['\xa9day'] = [year]
         if lyrics:
             audio['\xa9lyr'] = [lyrics]
         if cover:
-            audio['covr'] = [MP4Cover(cover, imageformat=MP4Cover.FORMAT_JPEG)]
+            fmt = MP4Cover.FORMAT_PNG if cover.startswith(b'\x89PNG') else MP4Cover.FORMAT_JPEG
+            audio['covr'] = [MP4Cover(cover, imageformat=fmt)]
         audio.save()
 
     @staticmethod
-    def _tag_ogg(path: Path, title: str, artist: str, album: str, track: int, disc: int,
-                 year: str, cover: Optional[bytes], lyrics: str) -> None:
+    def _tag_ogg(
+        path: Path,
+        title: str,
+        artist: str,
+        album_artist: str,
+        album: str,
+        track: int,
+        total_tracks: int,
+        disc: int,
+        year: str,
+        cover: Optional[bytes],
+        lyrics: str,
+    ) -> None:
         try:
             audio = OggOpus(str(path))
         except Exception:
             audio = OggVorbis(str(path))
-        audio['title'] = title
-        audio['artist'] = artist
-        audio['albumartist'] = artist
+        audio['title'] = [title]
+        audio['artist'] = [artist]
+        if album_artist:
+            audio['albumartist'] = [album_artist]
+            audio['album_artist'] = [album_artist]
         if album:
-            audio['album'] = album
-        audio['tracknumber'] = str(track)
-        audio['discnumber'] = str(disc)
+            audio['album'] = [album]
+        audio['tracknumber'] = [str(track)]
+        if total_tracks > 0:
+            audio['totaltracks'] = [str(total_tracks)]
+        audio['discnumber'] = [str(disc)]
         if year:
-            audio['date'] = year
+            audio['date'] = [year]
         if lyrics:
-            audio['lyrics'] = lyrics
+            audio['lyrics'] = [lyrics]
+        if cover:
+            try:
+                import base64
+                pic = Picture()
+                pic.type = 3
+                pic.mime = 'image/png' if cover.startswith(b'\x89PNG') else 'image/jpeg'
+                pic.desc = 'Cover'
+                pic.data = cover
+                audio['metadata_block_picture'] = [base64.b64encode(pic.write()).decode('ascii')]
+            except Exception as e:
+                logger.debug(f"Opus/Ogg 封面内嵌失败: {e}")
         audio.save()

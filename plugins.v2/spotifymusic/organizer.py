@@ -32,7 +32,21 @@ def build_relative_path(template: str, track_info: Dict[str, Any], ext: str) -> 
     """
     title = sanitize_path_part(str(track_info.get("title") or track_info.get("name") or "Unknown Title"))
     artists_list = track_info.get("artists") or []
-    artist = sanitize_path_part(str(track_info.get("artist") or ", ".join(artists_list) or "Unknown Artist"))
+    if isinstance(artists_list, list):
+        artist_raw = ", ".join([str(a).strip() for a in artists_list if a and str(a).strip()])
+    else:
+        artist_raw = ""
+    artist = sanitize_path_part(str(track_info.get("artist") or artist_raw or "Unknown Artist"))
+
+    album_artists_list = track_info.get("album_artists") or []
+    if isinstance(album_artists_list, list):
+        album_artist_raw = ", ".join([str(a).strip() for a in album_artists_list if a and str(a).strip()])
+    else:
+        album_artist_raw = ""
+    album_artist = sanitize_path_part(
+        str(track_info.get("album_artist") or track_info.get("albumartist") or album_artist_raw or artist)
+    )
+
     album = sanitize_path_part(str(track_info.get("album") or "Unknown Album"))
     release_date = str(track_info.get("release_date") or "")
     year = release_date[:4] if len(release_date) >= 4 else "Unknown Year"
@@ -57,6 +71,8 @@ def build_relative_path(template: str, track_info: Dict[str, Any], ext: str) -> 
         rendered = tpl.format(
             artist=artist,
             artists=artist,
+            album_artist=album_artist,
+            albumartist=album_artist,
             title=title,
             album=album,
             year=year,
@@ -64,6 +80,7 @@ def build_relative_path(template: str, track_info: Dict[str, Any], ext: str) -> 
     except Exception as e:
         logger.warning(f"目录模板渲染异常 ({tpl}): {e}，回退到默认结构")
         rendered = f"{artist}/{album}/{track_num:02d} - {title}.{ext_clean}"
+
 
     # 清理每一个路径段
     parts = [sanitize_path_part(p) for p in rendered.split('/') if p.strip()]
