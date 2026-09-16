@@ -6,7 +6,11 @@
 from __future__ import annotations
 
 
-def render_music_workbench_html(plugin_name: str = "Spotify 音乐工作台", api_prefix: str = "/api/v1/plugin/SpotifyMusic") -> str:
+def render_music_workbench_html(
+    plugin_name: str = "Spotify 音乐工作台",
+    api_prefix: str = "/api/v1/plugin/SpotifyMusic",
+    default_token: str = "",
+) -> str:
     """生成内嵌 Vue 3 与 TailwindCSS 的单页交互界面 HTML。"""
     return f"""<!DOCTYPE html>
 <html lang="zh-CN">
@@ -58,7 +62,7 @@ def render_music_workbench_html(plugin_name: str = "Spotify 音乐工作台", ap
         <div>
           <h1 class="text-xl font-bold tracking-tight text-white flex items-center gap-2">
             Spotify 音乐搜索与订阅工作台
-            <span class="text-xs font-normal px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">v1.0.7</span>
+            <span class="text-xs font-normal px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">v1.0.8</span>
           </h1>
           <p class="text-xs text-slate-400">高品质音频下载 • 元数据/歌词/封面打标 • 增量订阅管理</p>
         </div>
@@ -81,6 +85,17 @@ def render_music_workbench_html(plugin_name: str = "Spotify 音乐工作台", ap
             </span>
           </button>
         </div>
+
+        <!-- 复制 API-Key 按钮 -->
+        <button 
+          v-if="token"
+          @click="copyToken"
+          title="复制 API-Key 凭证到剪贴板"
+          class="px-3 py-2 rounded-xl bg-slate-800/80 hover:bg-slate-700 text-slate-300 hover:text-emerald-400 border border-slate-700/50 transition flex items-center gap-1.5 text-xs font-medium"
+        >
+          <i class="fa-regular fa-copy"></i>
+          <span class="hidden sm:inline">复制 API-Key</span>
+        </button>
 
         <button 
           @click="showTokenModal = true"
@@ -107,6 +122,21 @@ def render_music_workbench_html(plugin_name: str = "Spotify 音乐工作台", ap
         <p class="text-xs text-slate-400 leading-relaxed">
           请输入 MoviePilot 的 API Token 进行鉴权。可在 MoviePilot Web 界面<b>【设置 -> 基础设置 -> API Token】</b>中查看。凭证将安全保存在您的本地浏览器中。
         </p>
+
+        <!-- 已绑定 Token 状态与复制提示 -->
+        <div v-if="token" class="p-3 bg-emerald-950/40 border border-emerald-800/50 rounded-xl flex items-center justify-between text-xs">
+          <div class="flex items-center gap-2 text-emerald-300 truncate">
+            <i class="fa-solid fa-circle-check"></i>
+            <span>已同步 MoviePilot 鉴权凭证</span>
+          </div>
+          <button 
+            @click="copyToken" 
+            class="px-2.5 py-1 rounded bg-emerald-700 hover:bg-emerald-600 text-white font-medium flex items-center gap-1 transition text-[11px] flex-shrink-0"
+          >
+            <i class="fa-regular fa-copy"></i> 复制凭证
+          </button>
+        </div>
+
         <div>
           <input 
             v-model="tokenInput" 
@@ -474,14 +504,37 @@ def render_music_workbench_html(plugin_name: str = "Spotify 音乐工作台", ap
     createApp({{
       setup() {{
         const apiPrefix = '{api_prefix}';
+        const defaultToken = '{default_token}';
         const urlParams = new URLSearchParams(window.location.search);
-        const token = ref(urlParams.get('token') || urlParams.get('apikey') || localStorage.getItem('mp_api_token') || '');
+        const token = ref(urlParams.get('token') || urlParams.get('apikey') || defaultToken || localStorage.getItem('mp_api_token') || '');
         if (token.value) {{
           localStorage.setItem('mp_api_token', token.value);
         }}
 
         const showTokenModal = ref(!token.value);
         const tokenInput = ref(token.value);
+
+        const copyToken = async () => {{
+          if (!token.value) {{
+            showToast('当前无可用 Token', 'error');
+            return;
+          }}
+          try {{
+            if (navigator.clipboard && navigator.clipboard.writeText) {{
+              await navigator.clipboard.writeText(token.value);
+            }} else {{
+              const textarea = document.createElement('textarea');
+              textarea.value = token.value;
+              document.body.appendChild(textarea);
+              textarea.select();
+              document.execCommand('copy');
+              document.body.removeChild(textarea);
+            }}
+            showToast('API-Key 凭证已成功复制到剪贴板！');
+          }} catch (err) {{
+            showToast('复制失败，请手动复制', 'error');
+          }}
+        }};
 
         const saveToken = () => {{
           if (!tokenInput.value.trim()) return;
@@ -724,6 +777,7 @@ def render_music_workbench_html(plugin_name: str = "Spotify 音乐工作台", ap
           tokenInput,
           saveToken,
           token,
+          copyToken,
         }};
       }}
     }}).mount('#app');

@@ -11,6 +11,14 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi.responses import HTMLResponse
 
+try:
+    from app.core.config import settings
+except ImportError:
+    try:
+        from app.runtime.config import settings
+    except ImportError:
+        settings = None
+
 from app.core.event import eventmanager
 from app.log import logger
 from app.plugins import _PluginBase
@@ -29,11 +37,17 @@ class SpotifyMusic(_PluginBase):
     plugin_name = "Spotify音乐下载与订阅"
     plugin_desc = "支持 Spotify 链接解析、音乐搜索、歌单/艺术家增量订阅、元数据标签/封面/歌词内嵌与目录自动整理。"
     plugin_icon = "spotifymusic.png"
-    plugin_version = "1.0.7"
+    plugin_version = "1.0.8"
     plugin_label = "音乐管理"
     plugin_author = "local"
     plugin_order = 10
     auth_level = 1
+
+    def _get_api_token(self) -> str:
+        """获取 MoviePilot 系统的 API Token。"""
+        if settings and hasattr(settings, "API_TOKEN") and settings.API_TOKEN:
+            return str(settings.API_TOKEN).strip()
+        return ""
 
     # 内部状态
     _enabled: bool = False
@@ -143,6 +157,13 @@ class SpotifyMusic(_PluginBase):
 
     def get_form(self) -> Tuple[Optional[List[dict]], Dict[str, Any]]:
         """拼装插件配置页面表单 (Vuetify JSON 结构)。"""
+        api_token = self._get_api_token()
+        workbench_url = (
+            f"/api/v1/plugin/SpotifyMusic/ui?token={api_token}"
+            if api_token
+            else "/api/v1/plugin/SpotifyMusic/ui"
+        )
+
         form_schema = [
             {
                 "component": "VForm",
@@ -173,53 +194,14 @@ class SpotifyMusic(_PluginBase):
                                 "props": {"cols": 12},
                                 "content": [
                                     {
-                                        "component": "VTextField",
+                                        "component": "VBtn",
                                         "props": {
-                                            "model": "add_spotify_url",
-                                            "label": "【快捷添加】Spotify 链接订阅 / 即时下载",
-                                            "placeholder": "例如: https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M",
-                                        },
-                                    }
-                                ],
-                            }
-                        ],
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12},
-                                "content": [
-                                    {
-                                        "component": "VSelect",
-                                        "props": {
-                                            "model": "add_sync_mode",
-                                            "label": "Spotify 链接处理模式",
-                                            "items": [
-                                                {"title": "🌿 仅监控新增 (首次建立存量基准，后续仅下载新歌)", "value": "only_new"},
-                                                {"title": "📦 全量订阅 (立即将已有全部歌曲排入下载，并持续监控新歌)", "value": "all"},
-                                                {"title": "⚡ 单次批量下载 (仅下载当前所有歌曲，不加入长期订阅)", "value": "once"},
-                                            ],
-                                        },
-                                    }
-                                ],
-                            }
-                        ],
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "search_keyword",
-                                            "label": "【快捷搜索】单曲直接搜索下载",
-                                            "placeholder": "例如输入: 周杰伦 晴天 或 Taylor Swift Cruel Summer",
+                                            "color": "primary",
+                                            "href": workbench_url,
+                                            "target": "_blank",
+                                            "text": "🚀 打开全功能音乐工作台 (实时搜索 / 链接订阅 / 队列监控)",
+                                            "prependIcon": "mdi-open-in-new",
+                                            "block": True,
                                         },
                                     }
                                 ],
@@ -435,9 +417,6 @@ class SpotifyMusic(_PluginBase):
         ]
         default_config = {
             "enabled": False,
-            "add_spotify_url": "",
-            "add_sync_mode": "only_new",
-            "search_keyword": "",
             "music_dir": "/media/music",
             "format": "mp3",
             "bitrate": "320",
@@ -468,7 +447,11 @@ class SpotifyMusic(_PluginBase):
         subs = self._db.list_subscriptions()
         tasks = self._db.list_tasks(limit=15)
         completed_tasks = [t for t in tasks if t.get("status") == "completed"]
-        active_tasks = [t for t in tasks if t.get("status") in ("downloading", "processing", "pending")]
+        active_tasks = [
+            t
+            for t in tasks
+            if t.get("status") in ("downloading", "processing", "pending")
+        ]
         failed_tasks = [t for t in tasks if t.get("status") == "failed"]
 
         sub_list_text = []
@@ -479,7 +462,11 @@ class SpotifyMusic(_PluginBase):
                 f"• 【{s.get('type', '').upper()}】{s.get('name')} | 模式: {mode_text} | "
                 f"已下载: {s.get('downloaded_tracks', 0)} 首 | 上次检查: {last_chk}"
             )
-        subs_summary = "\n".join(sub_list_text) if sub_list_text else "暂无活跃订阅。可通过插件配置直接添加 Spotify 链接。"
+        subs_summary = (
+            "\n".join(sub_list_text)
+            if sub_list_text
+            else "暂无活跃订阅。可点击下方工作台直接添加 Spotify 链接。"
+        )
 
         recent_task_text = []
         for t in tasks[:8]:
@@ -489,45 +476,65 @@ class SpotifyMusic(_PluginBase):
             recent_task_text.append(
                 f"{status_icon} [{st.upper()}] {t.get('artist')} - {t.get('title')} ({pct:.0f}%)"
             )
-        tasks_summary = "\n".join(recent_task_text) if recent_task_text else "暂无下载任务记录。"
+        tasks_summary = (
+            "\n".join(recent_task_text) if recent_task_text else "暂无下载任务记录。"
+        )
+
+        api_token = self._get_api_token()
+        workbench_url = (
+            f"/api/v1/plugin/SpotifyMusic/ui?token={api_token}"
+            if api_token
+            else "/api/v1/plugin/SpotifyMusic/ui"
+        )
 
         return [
+            {
+                "component": "VCard",
+                "props": {"class": "mb-4", "color": "primary", "variant": "tonal"},
+                "content": [
+                    {
+                        "component": "VCardTitle",
+                        "text": "🎧 Spotify 音乐全功能独立工作台",
+                    },
+                    {
+                        "component": "VCardText",
+                        "text": (
+                            "推荐使用专属 Web 工作台：无需在设置中反复保存，直接在网页中实时检索、查看专辑封面、一键下载、Spotify 链接解析与增量订阅管理，并实时监控下载转码进度。\n\n"
+                            "💡 点击下方按钮将在新标签页中打开工作台，已自动注入 MoviePilot 鉴权凭证。"
+                        ),
+                    },
+                    {
+                        "component": "VCardActions",
+                        "content": [
+                            {
+                                "component": "VBtn",
+                                "props": {
+                                    "color": "primary",
+                                    "href": workbench_url,
+                                    "target": "_blank",
+                                    "text": "🚀 立即进入音乐工作台 (免配 Token)",
+                                    "prependIcon": "mdi-open-in-new",
+                                    "block": True,
+                                },
+                            }
+                        ],
+                    },
+                ],
+            },
             {
                 "component": "VCard",
                 "props": {"class": "mb-4"},
                 "content": [
                     {
                         "component": "VCardTitle",
-                        "text": "🎵 Spotify 音乐服务运行概况",
+                        "text": "🎵 运行概况与订阅统计",
                     },
                     {
                         "component": "VCardText",
                         "text": (
                             f"【运行状态】已激活订阅: {len(subs)} 个 | 进行中任务: {len(active_tasks)} 个 | 已完成: {len(completed_tasks)} 条 | 失败: {len(failed_tasks)} 条\n\n"
-                            f"【💡 快速使用指引】\n"
-                            f"1. 点击当前插件右上角的【设置 (齿轮)】按钮；\n"
-                            f"2. 在【快捷添加】栏粘贴 Spotify 单曲/专辑/歌单/艺术家链接，选择【仅监控新增】或【全量订阅】，点击【保存】即可自动后台执行！\n"
-                            f"3. 在【快捷搜索】栏输入 '歌手 歌名'（如 '周杰伦 晴天'），点击【保存】即可自动匹配下载并归档！\n\n"
                             f"【已订阅的歌单与艺术家】\n{subs_summary}\n\n"
                             f"【最近任务动态】\n{tasks_summary}"
-                        ),
-                    },
-                ],
-            },
-            {
-                "component": "VCard",
-                "props": {"class": "mb-4", "color": "surface-variant"},
-                "content": [
-                    {
-                        "component": "VCardTitle",
-                        "text": "🎧 全屏音乐搜索与管理工作台",
-                    },
-                    {
-                        "component": "VCardText",
-                        "text": (
-                            "插件同时内置了独立的响应式 Web 交互工作台（无需在设置中反复保存，直接在网页中实时搜索、看封面、一键下载与监控任务）。\n\n"
-                            "🔗 访问路径：/api/v1/plugin/SpotifyMusic/ui\n"
-                            "💡 提示：在浏览器新标签页中直接打开上述路径即可使用。"
                         ),
                     },
                 ],
@@ -639,7 +646,10 @@ class SpotifyMusic(_PluginBase):
 
     def api_ui(self) -> Any:
         """返回内置独立音乐搜索工作台 HTML。"""
-        return HTMLResponse(content=render_music_workbench_html())
+        api_token = self._get_api_token()
+        return HTMLResponse(
+            content=render_music_workbench_html(default_token=api_token)
+        )
 
     def api_search_query(self, query: str = "", limit: int = 15) -> Dict[str, Any]:
         """搜索歌曲候选项列表（优先使用配置的 Spotify 官方 API，回退至 YouTube Music）。"""
