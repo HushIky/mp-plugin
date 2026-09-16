@@ -171,3 +171,112 @@ def match_youtube_track(
         logger.warning(f"yt-dlp 搜索匹配音源失败: {e}")
 
     return None
+
+
+def search_music_candidates(
+    query: str,
+    limit: int = 15,
+    proxy: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """
+    搜索音乐候选列表，返回包含标题、艺术家、专辑、封面、时长的结构化字典。
+    """
+    query = (query or "").strip()
+    if not query:
+        return []
+
+    candidates: List[Dict[str, Any]] = []
+    ytm = get_ytm_client()
+    if ytm:
+        try:
+            results = ytm.search(query, filter="songs", limit=limit)
+            for r in results:
+                vid = r.get("videoId")
+                if not vid:
+                    continue
+                title = r.get("title") or "未知歌曲"
+                artists_list = [
+                    a.get("name", "")
+                    for a in (r.get("artists") or [])
+                    if isinstance(a, dict) and a.get("name")
+                ]
+                artist = ", ".join(artists_list) if artists_list else "未知艺术家"
+                album_info = r.get("album")
+                album_name = album_info.get("name") if isinstance(album_info, dict) else ""
+
+                thumbnails = r.get("thumbnails") or []
+                cover_url = thumbnails[-1].get("url") if thumbnails else ""
+
+                duration_sec = r.get("duration_seconds") or 0
+                duration_str = r.get("duration") or ""
+                if not duration_str and duration_sec:
+                    m, s = divmod(int(duration_sec), 60)
+                    duration_str = f"{m:02d}:{s:02d}"
+
+                candidates.append({
+                    "id": vid,
+                    "title": title,
+                    "artist": artist,
+                    "album": album_name or "",
+                    "album_artist": artist,
+                    "duration": duration_sec,
+                    "duration_str": duration_str,
+                    "cover_url": cover_url,
+                    "source": "ytmusic",
+                    "url": f"https://music.youtube.com/watch?v={vid}",
+                })
+            if candidates:
+                return candidates
+        except Exception as e:
+            logger.debug(f"YTMusic 搜索候选异常: {e}")
+
+    # 回退 yt-dlp 搜索
+    if not _HAS_YTDLP:
+        return candidates
+
+    ydl_opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "extract_flat": "in_playlist",
+        "skip_download": True,
+        "noplaylist": True,
+    }
+    if proxy:
+        ydl_opts["proxy"] = proxy
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            search_query = f"ytsearch{limit}:{query}"
+            info = ydl.extract_info(search_query, download=False)
+            entries = (info or {}).get("entries") or []
+            for entry in entries:
+                if not entry:
+                    continue
+                vid = entry.get("id")
+                if not vid:
+                    continue
+                title = entry.get("title", "")
+                uploader = entry.get("uploader") or entry.get("channel") or "未知艺术家"
+                dur = int(entry.get("duration") or 0)
+                m, s = divmod(dur, 60)
+                dur_str = f"{m:02d}:{s:02d}" if dur else ""
+                thumbnails = entry.get("thumbnails") or []
+                cover = thumbnails[-1].get("url") if thumbnails else (entry.get("thumbnail") or "")
+
+                candidates.append({
+                    "id": vid,
+                    "title": title,
+                    "artist": uploader,
+                    "album": "",
+                    "album_artist": uploader,
+                    "duration": dur,
+                    "duration_str": dur_str,
+                    "cover_url": cover,
+                    "source": "youtube",
+                    "url": f"https://www.youtube.com/watch?v={vid}",
+                })
+    except Exception as e:
+        logger.warning(f"yt-dlp 搜索候选失败: {e}")
+
+    return candidates
+
