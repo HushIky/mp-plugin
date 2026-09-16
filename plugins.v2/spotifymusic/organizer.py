@@ -21,9 +21,37 @@ def sanitize_path_part(text: str) -> str:
     return safe or 'Unknown'
 
 
+def extract_primary_artist(val: Any) -> str:
+    """
+    从艺术家字段或列表中提取第一位/主艺术家名称（用于目录与文件名路径模板渲染）。
+
+    支持传入 list/tuple（取第一个有效元素）、单个字符串（支持英文/中文逗号、分号、斜杠、顿号、feat/ft 等多艺术家分隔符拆分后取第一位）。
+    """
+    if not val:
+        return ""
+    if isinstance(val, (list, tuple, set)):
+        for item in val:
+            if item and str(item).strip():
+                return extract_primary_artist(str(item).strip())
+        return ""
+
+    text = str(val).strip()
+    if not text:
+        return ""
+
+    parts = re.split(r'[,，;；/、]|\s+(?:feat\.?|ft\.?)\s+', text, flags=re.IGNORECASE)
+    for p in parts:
+        cleaned = p.strip()
+        if cleaned:
+            return cleaned
+    return text
+
+
 def build_relative_path(template: str, track_info: Dict[str, Any], ext: str) -> Path:
     """
     根据用户配置的模板构建相对路径。
+    注意：为避免目录层级过长或文件名凌乱，{artist} 与 {album_artist} 模板占位符均仅取首位（第一位）主艺术家；
+    如用户需要全部艺术家，可使用 {all_artists} 占位符。
 
     :param template: 路径模板，例如 "{artist}/{album} ({year})/{track_number:02d} - {title}.{ext}"
     :param track_info: 曲目元数据
@@ -31,21 +59,24 @@ def build_relative_path(template: str, track_info: Dict[str, Any], ext: str) -> 
     :return: 相对 Path 对象
     """
     title = sanitize_path_part(str(track_info.get("title") or track_info.get("name") or "Unknown Title"))
-    artists_list = track_info.get("artists") or []
-    if isinstance(artists_list, list):
-        artist_raw = ", ".join([str(a).strip() for a in artists_list if a and str(a).strip()])
-    else:
-        artist_raw = ""
-    artist = sanitize_path_part(str(track_info.get("artist") or artist_raw or "Unknown Artist"))
+    
+    # 提取第一位主艺术家（用于目录与文件名）
+    primary_artist = extract_primary_artist(track_info.get("artists") or track_info.get("artist")) or "Unknown Artist"
+    artist = sanitize_path_part(primary_artist)
 
-    album_artists_list = track_info.get("album_artists") or []
-    if isinstance(album_artists_list, list):
-        album_artist_raw = ", ".join([str(a).strip() for a in album_artists_list if a and str(a).strip()])
+    # 提取第一位专辑艺术家（用于目录与文件名）
+    primary_album_artist = extract_primary_artist(
+        track_info.get("album_artists") or track_info.get("album_artist") or track_info.get("albumartist")
+    ) or primary_artist
+    album_artist = sanitize_path_part(primary_album_artist)
+
+    # 全量多艺术家（用于 {all_artists} 模板备选占位符）
+    artists_list = track_info.get("artists") or []
+    if isinstance(artists_list, (list, tuple, set)):
+        all_artists_raw = ", ".join([str(a).strip() for a in artists_list if a and str(a).strip()])
     else:
-        album_artist_raw = ""
-    album_artist = sanitize_path_part(
-        str(track_info.get("album_artist") or track_info.get("albumartist") or album_artist_raw or artist)
-    )
+        all_artists_raw = str(track_info.get("artist") or "")
+    all_artists = sanitize_path_part(all_artists_raw or primary_artist)
 
     album = sanitize_path_part(str(track_info.get("album") or "Unknown Album"))
     release_date = str(track_info.get("release_date") or "")
@@ -73,6 +104,7 @@ def build_relative_path(template: str, track_info: Dict[str, Any], ext: str) -> 
             artists=artist,
             album_artist=album_artist,
             albumartist=album_artist,
+            all_artists=all_artists,
             title=title,
             album=album,
             year=year,
@@ -80,7 +112,6 @@ def build_relative_path(template: str, track_info: Dict[str, Any], ext: str) -> 
     except Exception as e:
         logger.warning(f"目录模板渲染异常 ({tpl}): {e}，回退到默认结构")
         rendered = f"{artist}/{album}/{track_num:02d} - {title}.{ext_clean}"
-
 
     # 清理每一个路径段
     parts = [sanitize_path_part(p) for p in rendered.split('/') if p.strip()]
