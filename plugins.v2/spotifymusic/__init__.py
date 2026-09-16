@@ -37,7 +37,7 @@ class SpotifyMusic(_PluginBase):
     plugin_name = "Spotify音乐下载与订阅"
     plugin_desc = "支持 Spotify 链接解析、音乐搜索、歌单/艺术家增量订阅、元数据标签/封面/歌词内嵌与目录自动整理。"
     plugin_icon = "spotifymusic.png"
-    plugin_version = "1.0.8"
+    plugin_version = "1.0.9"
     plugin_label = "音乐管理"
     plugin_author = "local"
     plugin_order = 10
@@ -669,7 +669,12 @@ class SpotifyMusic(_PluginBase):
         if not url:
             return {"success": False, "message": "URL 不能为空"}
         try:
-            entity = spotify.resolve_spotify_entity(url, self._proxy or None)
+            entity = spotify.resolve_spotify_entity(
+                url,
+                self._proxy or None,
+                spotify_client_id=self._spotify_client_id or None,
+                spotify_client_secret=self._spotify_client_secret or None,
+            )
             return {"success": True, "data": entity}
         except Exception as e:
             return {"success": False, "message": f"解析 Spotify 链接失败: {str(e)}"}
@@ -710,7 +715,12 @@ class SpotifyMusic(_PluginBase):
 
         try:
             # 1. 解析远端元数据与曲目列表
-            entity = spotify.resolve_spotify_entity(url, self._proxy or None)
+            entity = spotify.resolve_spotify_entity(
+                url,
+                self._proxy or None,
+                spotify_client_id=self._spotify_client_id or None,
+                spotify_client_secret=self._spotify_client_secret or None,
+            )
             sub_type = entity.get("type", "playlist")
             spotify_id = entity.get("spotify_id", "")
             name = entity.get("name") or "未命名订阅"
@@ -832,7 +842,12 @@ class SpotifyMusic(_PluginBase):
         logger.info(f"[{self.plugin_name}] 开始检查订阅更新: {sub_name} ({url})")
 
         try:
-            entity = spotify.resolve_spotify_entity(url, self._proxy or None)
+            entity = spotify.resolve_spotify_entity(
+                url,
+                self._proxy or None,
+                spotify_client_id=self._spotify_client_id or None,
+                spotify_client_secret=self._spotify_client_secret or None,
+            )
             tracks = entity.get("tracks") or []
 
             # 如果是艺术家，解析每个新 Release
@@ -845,7 +860,12 @@ class SpotifyMusic(_PluginBase):
                     # 拉取该 release 详情
                     rel_url = f"https://open.spotify.com/album/{rel_id}"
                     try:
-                        album_ent = spotify.resolve_spotify_entity(rel_url, self._proxy or None)
+                        album_ent = spotify.resolve_spotify_entity(
+                            rel_url,
+                            self._proxy or None,
+                            spotify_client_id=self._spotify_client_id or None,
+                            spotify_client_secret=self._spotify_client_secret or None,
+                        )
                         for t in album_ent.get("tracks") or []:
                             t_id = t.get("spotify_id")
                             if t_id and not self._db.is_track_in_history(sub_id, t_id):
@@ -898,7 +918,12 @@ class SpotifyMusic(_PluginBase):
             return
         logger.info(f"[{self.plugin_name}] 正在处理手动提交的 Spotify 链接: {url} (模式: {sync_mode})")
         try:
-            entity = spotify.resolve_spotify_entity(url, self._proxy or None)
+            entity = spotify.resolve_spotify_entity(
+                url,
+                self._proxy or None,
+                spotify_client_id=self._spotify_client_id or None,
+                spotify_client_secret=self._spotify_client_secret or None,
+            )
             sub_type = entity.get("type", "playlist")
             spotify_id = entity.get("spotify_id", "")
             name = entity.get("name") or "未命名"
