@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-import asyncio
+import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -26,7 +26,7 @@ class SpotifyMusic(_PluginBase):
     plugin_name = "Spotify音乐下载与订阅"
     plugin_desc = "支持 Spotify 链接解析、音乐搜索、歌单/艺术家增量订阅、元数据标签/封面/歌词内嵌与目录自动整理。"
     plugin_icon = "spotifymusic.png"
-    plugin_version = "1.0.0"
+    plugin_version = "1.0.2"
     plugin_label = "音乐管理"
     plugin_author = "local"
     plugin_order = 10
@@ -146,7 +146,7 @@ class SpotifyMusic(_PluginBase):
                                     {
                                         "component": "VSelect",
                                         "props": {
-                                            "model": "format",
+                                             "model": "format",
                                             "label": "音频输出格式",
                                             "items": [
                                                 {"title": "MP3", "value": "mp3"},
@@ -185,7 +185,7 @@ class SpotifyMusic(_PluginBase):
                             "model": "template",
                             "label": "目录与文件命名模板",
                             "placeholder": "{artist}/{album} ({year})/{track_number:02d} - {title}.{ext}",
-                            "hint": "可用变量: {artist}, {album}, {title}, {year}, {track_number:02d}, {ext}",
+                            "hint": "可用变量: {artist}, {album_artist}, {album}, {title}, {year}, {track_number:02d}, {ext}",
                             "persistentHint": True,
                         },
                     },
@@ -417,24 +417,24 @@ class SpotifyMusic(_PluginBase):
 
     # ==================== API 路由处理逻辑 ====================
 
-    async def api_resolve_url(self, url: str) -> Dict[str, Any]:
+    def api_resolve_url(self, url: str) -> Dict[str, Any]:
         """解析 Spotify 链接。"""
         if not url:
             return {"success": False, "message": "URL 不能为空"}
         try:
-            entity = await asyncio.to_thread(spotify.resolve_spotify_entity, url, self._proxy or None)
+            entity = spotify.resolve_spotify_entity(url, self._proxy or None)
             return {"success": True, "data": entity}
         except Exception as e:
             return {"success": False, "message": f"解析 Spotify 链接失败: {str(e)}"}
 
-    async def api_download_single(self, track: Dict[str, Any]) -> Dict[str, Any]:
+    def api_download_single(self, track: Dict[str, Any]) -> Dict[str, Any]:
         """提交单曲下载。"""
         if not self._queue_mgr:
             return {"success": False, "message": "插件尚未初始化"}
         task_id = self._queue_mgr.submit_track(track)
         return {"success": True, "data": {"task_id": task_id}}
 
-    async def api_download_batch(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def api_download_batch(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """批量提交下载。"""
         if not self._queue_mgr:
             return {"success": False, "message": "插件尚未初始化"}
@@ -446,13 +446,13 @@ class SpotifyMusic(_PluginBase):
             task_ids.append(tid)
         return {"success": True, "data": {"task_ids": task_ids, "count": len(task_ids)}}
 
-    async def api_list_subscriptions(self) -> Dict[str, Any]:
+    def api_list_subscriptions(self) -> Dict[str, Any]:
         """查询所有订阅。"""
         if not self._db:
             return {"success": True, "data": []}
         return {"success": True, "data": self._db.list_subscriptions()}
 
-    async def api_add_subscription(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def api_add_subscription(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """添加订阅（支持 only_new 仅监控新增选项）。"""
         if not self._db or not self._queue_mgr:
             return {"success": False, "message": "插件尚未初始化"}
@@ -463,7 +463,7 @@ class SpotifyMusic(_PluginBase):
 
         try:
             # 1. 解析远端元数据与曲目列表
-            entity = await asyncio.to_thread(spotify.resolve_spotify_entity, url, self._proxy or None)
+            entity = spotify.resolve_spotify_entity(url, self._proxy or None)
             sub_type = entity.get("type", "playlist")
             spotify_id = entity.get("spotify_id", "")
             name = entity.get("name") or "未命名订阅"
@@ -501,38 +501,43 @@ class SpotifyMusic(_PluginBase):
         except Exception as e:
             return {"success": False, "message": f"添加订阅失败: {str(e)}"}
 
-    async def api_delete_subscription(self, sub_id: int) -> Dict[str, Any]:
+    def api_delete_subscription(self, sub_id: int) -> Dict[str, Any]:
         """删除订阅。"""
         if not self._db:
             return {"success": False, "message": "插件尚未初始化"}
         self._db.delete_subscription(sub_id)
         return {"success": True, "message": "订阅已删除"}
 
-    async def api_sync_subscription(self, sub_id: int) -> Dict[str, Any]:
+    def api_sync_subscription(self, sub_id: int) -> Dict[str, Any]:
         """立即手动检查指定订阅。"""
         if not self._db:
             return {"success": False, "message": "插件尚未初始化"}
         sub = self._db.get_subscription(sub_id)
         if not sub:
             return {"success": False, "message": "订阅不存在"}
-        
-        asyncio.create_task(self._sync_single_subscription(sub))
+
+        threading.Thread(
+            target=self._sync_single_subscription,
+            args=(sub,),
+            daemon=True,
+            name=f"SpotifyMusicSync-{sub_id}",
+        ).start()
         return {"success": True, "message": f"正在后台同步订阅 [{sub.get('name')}]"}
 
-    async def api_list_tasks(self, status: Optional[str] = None) -> Dict[str, Any]:
+    def api_list_tasks(self, status: Optional[str] = None) -> Dict[str, Any]:
         """查询任务队列。"""
         if not self._db:
             return {"success": True, "data": []}
         return {"success": True, "data": self._db.list_tasks(status=status, limit=100)}
 
-    async def api_clear_completed_tasks(self) -> Dict[str, Any]:
+    def api_clear_completed_tasks(self) -> Dict[str, Any]:
         """清理已完成任务。"""
         if not self._db:
             return {"success": False, "message": "插件尚未初始化"}
         count = self._db.clear_completed_tasks()
         return {"success": True, "message": f"已清理 {count} 条已完成任务"}
 
-    async def api_retry_failed_tasks(self) -> Dict[str, Any]:
+    def api_retry_failed_tasks(self) -> Dict[str, Any]:
         """重试失败任务。"""
         if not self._db or not self._queue_mgr:
             return {"success": False, "message": "插件尚未初始化"}
@@ -558,13 +563,21 @@ class SpotifyMusic(_PluginBase):
         """定时任务：巡检所有已启用的订阅。"""
         if not self._enabled or not self._db:
             return
-        subs = self._db.list_subscriptions()
+        threading.Thread(
+            target=self._sync_all_subscriptions_worker,
+            daemon=True,
+            name="SpotifyMusicSyncAll",
+        ).start()
+
+    def _sync_all_subscriptions_worker(self) -> None:
+        """后台线程：遍历检查所有启用订阅。"""
+        subs = self._db.list_subscriptions() if self._db else []
         for sub in subs:
             if not sub.get("enabled"):
                 continue
-            asyncio.create_task(self._sync_single_subscription(sub))
+            self._sync_single_subscription(sub)
 
-    async def _sync_single_subscription(self, sub: Dict[str, Any]) -> None:
+    def _sync_single_subscription(self, sub: Dict[str, Any]) -> None:
         """执行单项订阅的增量检查与下载排队。"""
         sub_id = sub["id"]
         sub_name = sub.get("name", "")
@@ -572,9 +585,9 @@ class SpotifyMusic(_PluginBase):
         logger.info(f"[{self.plugin_name}] 开始检查订阅更新: {sub_name} ({url})")
 
         try:
-            entity = await asyncio.to_thread(spotify.resolve_spotify_entity, url, self._proxy or None)
+            entity = spotify.resolve_spotify_entity(url, self._proxy or None)
             tracks = entity.get("tracks") or []
-            
+
             # 如果是艺术家，解析每个新 Release
             if sub.get("type") == "artist":
                 releases = entity.get("releases") or []
@@ -585,7 +598,7 @@ class SpotifyMusic(_PluginBase):
                     # 拉取该 release 详情
                     rel_url = f"https://open.spotify.com/album/{rel_id}"
                     try:
-                        album_ent = await asyncio.to_thread(spotify.resolve_spotify_entity, rel_url, self._proxy or None)
+                        album_ent = spotify.resolve_spotify_entity(rel_url, self._proxy or None)
                         for t in album_ent.get("tracks") or []:
                             t_id = t.get("spotify_id")
                             if t_id and not self._db.is_track_in_history(sub_id, t_id):
@@ -638,3 +651,4 @@ class SpotifyMusic(_PluginBase):
             self._queue_mgr.stop()
             self._queue_mgr = None
         self._db = None
+

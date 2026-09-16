@@ -1,11 +1,13 @@
-"""异步下载任务队列管理器。
+"""下载任务队列管理器（线程安全版）。
 
-实现并发限流、状态流转、实时进度更新、失败隔离与下载历史联动。
+基于标准库 queue.Queue 与 threading.Thread 实现任务排队、并发控制、下载进度更新与状态流转，
+完全解耦运行态事件循环，可在任意同步/异步线程中安全初始化与调用。
 """
 
 from __future__ import annotations
 
-import asyncio
+import queue
+import threading
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,7 +30,7 @@ class DownloadJob:
 
 
 class DownloadQueueManager:
-    """管理异步下载队列与工作线程池。"""
+    """管理下载队列与工作线程池。"""
 
     def __init__(
         self,
@@ -49,14 +51,15 @@ class DownloadQueueManager:
         self.template = template
         self.audio_format = audio_format
         self.audio_bitrate = audio_bitrate
-        self.max_parallel = max_parallel
+        self.max_parallel = max(1, int(max_parallel))
         self.download_lyrics = download_lyrics
         self.proxy = proxy
         self.on_task_completed = on_task_completed
 
-        self._queue: asyncio.Queue[DownloadJob] = asyncio.Queue()
-        self._semaphore = asyncio.Semaphore(max_parallel)
-        self._workers: list[asyncio.Task] = []
+        self._queue: queue.Queue[Optional[DownloadJob]] = queue.Queue()
+        self._semaphore = threading.Semaphore(self.max_parallel)
+        self._workers: list[threading.Thread] = []
+        self._stop_event = threading.Event()
         self._running = False
         self._downloader = self._build_downloader()
 
@@ -94,26 +97,36 @@ class DownloadQueueManager:
         if proxy is not None:
             self.proxy = proxy or None
         if max_parallel and max_parallel != self.max_parallel:
-            self.max_parallel = max_parallel
-            self._semaphore = asyncio.Semaphore(max_parallel)
+            self.max_parallel = max(1, int(max_parallel))
+            self._semaphore = threading.Semaphore(self.max_parallel)
 
         self._downloader = self._build_downloader()
 
     def start(self, num_workers: int = 2) -> None:
-        """启动后台工作协程。"""
+        """启动后台工作线程。"""
         if self._running:
             return
         self._running = True
+        self._stop_event.clear()
         for i in range(num_workers):
-            task = asyncio.create_task(self._worker_loop(i))
-            self._workers.append(task)
-        logger.info(f"SpotifyMusic 任务队列已启动，工作协程数: {num_workers}，最大并发数: {self.max_parallel}")
+            t = threading.Thread(
+                target=self._worker_loop,
+                args=(i,),
+                daemon=True,
+                name=f"SpotifyMusicWorker-{i}",
+            )
+            t.start()
+            self._workers.append(t)
+        logger.info(f"SpotifyMusic 任务队列已启动，工作线程数: {num_workers}，最大并发数: {self.max_parallel}")
 
     def stop(self) -> None:
-        """停止队列并清理工作协程。"""
+        """停止队列并清理工作线程。"""
         self._running = False
+        self._stop_event.set()
+        for _ in self._workers:
+            self._queue.put(None)
         for t in self._workers:
-            t.cancel()
+            t.join(timeout=2.0)
         self._workers.clear()
         logger.info("SpotifyMusic 任务队列已停止")
 
@@ -149,24 +162,29 @@ class DownloadQueueManager:
             subscription_id=subscription_id,
             playlist_name=playlist_name,
         )
-        self._queue.put_nowait(job)
+        self._queue.put(job)
         return task_id
 
-    async def _worker_loop(self, worker_id: int) -> None:
+    def _worker_loop(self, worker_id: int) -> None:
         """消费者循环。"""
-        while self._running:
+        while self._running and not self._stop_event.is_set():
             try:
-                job = await self._queue.get()
-                async with self._semaphore:
-                    await self._process_job(job)
-                self._queue.task_done()
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error(f"工作协程 #{worker_id} 处理异常: {e}")
-                await asyncio.sleep(1)
+                try:
+                    job = self._queue.get(timeout=1.0)
+                except queue.Empty:
+                    continue
 
-    async def _process_job(self, job: DownloadJob) -> None:
+                if job is None:
+                    break
+
+                with self._semaphore:
+                    self._process_job(job)
+
+                self._queue.task_done()
+            except Exception as e:
+                logger.error(f"工作线程 #{worker_id} 处理异常: {e}")
+
+    def _process_job(self, job: DownloadJob) -> None:
         """执行单个下载与归档任务。"""
         task_id = job.task_id
         track = job.track_info
@@ -179,9 +197,8 @@ class DownloadQueueManager:
             self.db.update_task_progress(task_id, status="downloading", progress=pct, speed=text)
 
         try:
-            # 在独立线程池中执行密集 I/O 与音轨转码
-            audio_temp, lrc_temp = await asyncio.to_thread(
-                self._downloader.download_and_tag,
+            # 执行密集 I/O 与音轨转码
+            audio_temp, lrc_temp = self._downloader.download_and_tag(
                 track_info=track,
                 progress_callback=progress_cb,
             )
@@ -228,3 +245,4 @@ class DownloadQueueManager:
         except Exception as err:
             logger.error(f"下载任务 [{title} - {artist}] 失败: {err}")
             self.db.update_task_progress(task_id, status="failed", error_msg=str(err))
+
