@@ -62,7 +62,7 @@ def render_music_workbench_html(
         <div>
           <h1 class="text-xl font-bold tracking-tight text-white flex items-center gap-2">
             Spotify 音乐搜索与订阅工作台
-            <span class="text-xs font-normal px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">v1.1.1</span>
+            <span class="text-xs font-normal px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">v1.1.2</span>
           </h1>
           <p class="text-xs text-slate-400">高品质音频下载 • 元数据/歌词/封面打标 • 增量订阅管理</p>
         </div>
@@ -350,24 +350,117 @@ def render_music_workbench_html(
           </div>
         </div>
 
-        <!-- 曲目清单预览 -->
-        <div class="border-t border-slate-700/50 pt-4">
-          <div class="flex items-center justify-between mb-3">
-            <h4 class="text-sm font-semibold text-slate-300">曲目列表预览 (展示前 {{{{ Math.min(50, (resolvedEntity.tracks || []).length) }}}} 首)</h4>
-            <span v-if="(resolvedEntity.tracks || []).length > 50" class="text-xs text-slate-500">还有 {{{{ (resolvedEntity.tracks || []).length - 50 }}}} 首曲目未展开</span>
-          </div>
-          <div class="space-y-1.5 max-h-80 overflow-y-auto pr-2">
-            <div 
-              v-for="(t, i) in (resolvedEntity.tracks || []).slice(0, 50)" 
-              :key="t.spotify_id || i"
-              class="flex items-center justify-between p-2.5 rounded-xl bg-slate-800/40 text-xs text-slate-300 hover:bg-slate-800/80 transition"
-            >
-              <div class="flex items-center gap-3">
-                <span class="text-slate-500 font-mono w-6 text-right">{{{{ i + 1 }}}}</span>
-                <span class="font-medium text-white">{{{{ t.title }}}}</span>
-                <span class="text-slate-400"> - {{{{ t.artist }}}}</span>
+        <!-- 曲目清单预览 (按专辑分组展示全量曲目与专辑封面) -->
+        <div class="border-t border-slate-700/50 pt-5 space-y-4">
+          <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div>
+              <h4 class="text-sm font-semibold text-slate-200 flex items-center gap-2">
+                <i class="fa-solid fa-compact-disc text-emerald-400"></i>
+                曲目列表预览 (共 {{{{ albumGroups.length }}}} 张专辑 / {{{{ (resolvedEntity.tracks || []).length }}}} 首曲目)
+              </h4>
+              <p class="text-xs text-slate-400 mt-0.5">全量曲目已按专辑分类整理并展示专辑封面，支持展开/折叠与实时筛选</p>
+            </div>
+            
+            <div class="flex items-center gap-2">
+              <!-- 快捷筛选搜索框 -->
+              <div class="relative w-44 sm:w-56">
+                <i class="fa-solid fa-search absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 text-xs"></i>
+                <input 
+                  v-model="albumSearchQuery"
+                  type="text"
+                  placeholder="筛选专辑或曲目..."
+                  class="w-full pl-8 pr-3 py-1.5 bg-slate-800/80 border border-slate-700/80 rounded-lg text-xs text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500"
+                >
               </div>
-              <span class="text-slate-500 truncate max-w-[200px] text-right">{{{{ t.album }}}}</span>
+
+              <!-- 展开 / 折叠全部按钮 -->
+              <button 
+                @click="expandAllAlbums"
+                class="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs rounded-lg border border-slate-700 transition flex items-center gap-1"
+                title="展开所有专辑"
+              >
+                <i class="fa-solid fa-angles-down text-[10px]"></i>
+                <span class="hidden sm:inline">全部展开</span>
+              </button>
+              <button 
+                @click="collapseAllAlbums"
+                class="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs rounded-lg border border-slate-700 transition flex items-center gap-1"
+                title="折叠所有专辑"
+              >
+                <i class="fa-solid fa-angles-up text-[10px]"></i>
+                <span class="hidden sm:inline">全部折叠</span>
+              </button>
+            </div>
+          </div>
+
+          <!-- 专辑卡片分组滚动列表 -->
+          <div class="max-h-[640px] overflow-y-auto pr-2 space-y-3">
+            <div 
+              v-for="album in albumGroups"
+              :key="album.name"
+              class="glass-card rounded-xl border border-slate-700/60 overflow-hidden"
+            >
+              <!-- 专辑卡片头部 (封面 + 专辑名 + 发行日期 + 曲目数 + 折叠按钮) -->
+              <div 
+                @click="toggleAlbum(album.name)"
+                class="p-3.5 bg-slate-800/60 hover:bg-slate-800/90 cursor-pointer flex items-center justify-between gap-3 select-none transition"
+              >
+                <div class="flex items-center gap-3.5 min-w-0">
+                  <!-- 专辑封面 -->
+                  <div class="w-12 h-12 rounded-lg bg-slate-900 overflow-hidden flex-shrink-0 relative shadow border border-slate-700/50">
+                    <img v-if="album.cover_url" :src="album.cover_url" class="w-full h-full object-cover">
+                    <div v-else class="w-full h-full flex items-center justify-center text-slate-600 text-xl">
+                      <i class="fa-solid fa-compact-disc"></i>
+                    </div>
+                  </div>
+
+                  <!-- 专辑信息 -->
+                  <div class="min-w-0 flex-1">
+                    <div class="flex items-center gap-2">
+                      <h5 class="font-bold text-white text-sm truncate" :title="album.name">{{{{ album.name }}}}</h5>
+                      <span v-if="album.release_date" class="text-[11px] px-2 py-0.5 rounded bg-slate-700/60 text-slate-300 font-mono flex-shrink-0">
+                        {{{{ album.release_date.slice(0, 10) }}}}
+                      </span>
+                    </div>
+                    <p class="text-xs text-slate-400 truncate mt-0.5">
+                      共 <b class="text-emerald-400">{{{{ album.tracks.length }}}}</b> 首曲目
+                    </p>
+                  </div>
+                </div>
+
+                <div class="flex items-center gap-2 text-slate-400">
+                  <span class="text-xs text-slate-500 hidden sm:inline">{{{{ collapsedAlbums[album.name] ? '展开' : '折叠' }}}}</span>
+                  <i 
+                    class="fa-solid fa-chevron-down transition-transform duration-200"
+                    :class="{{ 'rotate-180': !collapsedAlbums[album.name] }}"
+                  ></i>
+                </div>
+              </div>
+
+              <!-- 专辑内曲目列表 -->
+              <div v-show="!collapsedAlbums[album.name]" class="p-2.5 bg-slate-900/40 border-t border-slate-800/80 space-y-1">
+                <div 
+                  v-for="(t, i) in album.tracks" 
+                  :key="t.spotify_id || i"
+                  class="flex items-center justify-between px-3 py-2 rounded-lg bg-slate-800/30 hover:bg-slate-800/80 text-xs text-slate-300 transition group"
+                >
+                  <div class="flex items-center gap-3 min-w-0 flex-1">
+                    <span class="text-slate-500 font-mono w-6 text-right flex-shrink-0">{{{{ t.track_number || (i + 1) }}}}</span>
+                    <span class="font-medium text-white group-hover:text-emerald-300 transition truncate" :title="t.title">{{{{ t.title }}}}</span>
+                    <span class="text-slate-400 truncate flex-shrink-0" :title="t.artist"> - {{{{ t.artist }}}}</span>
+                  </div>
+                  <div class="flex items-center gap-3 flex-shrink-0 text-slate-500 font-mono text-[11px] ml-2">
+                    <span v-if="t.duration">{{{{ formatDuration(t.duration) }}}}</span>
+                    <a v-if="t.url" :href="t.url" target="_blank" class="hover:text-emerald-400 text-slate-500" title="在 Spotify 中打开">
+                      <i class="fa-solid fa-arrow-up-right-from-square"></i>
+                    </a>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div v-if="albumGroups.length === 0" class="p-8 text-center text-slate-500 text-xs">
+              没有匹配到任何专辑或曲目
             </div>
           </div>
         </div>
@@ -497,8 +590,17 @@ def render_music_workbench_html(
             <div>
               已下载: <b class="text-white">{{{{ sub.downloaded_tracks || 0 }}}}</b> / {{{{ sub.total_tracks || 0 }}}} 首
             </div>
-            <div class="text-[11px] text-slate-500">
-              上次检查: {{{{ sub.last_check ? sub.last_check.slice(0, 16) : '未执行' }}}}
+            <div class="flex items-center gap-2.5">
+              <span class="text-[11px] text-slate-500">
+                上次检查: {{{{ sub.last_check ? sub.last_check.slice(0, 16) : '未执行' }}}}
+              </span>
+              <button 
+                @click="inspectSubscription(sub)" 
+                class="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-emerald-400 hover:text-emerald-300 border border-slate-700 transition text-[11px] flex items-center gap-1"
+                title="查看专辑与曲目预览"
+              >
+                <i class="fa-solid fa-eye"></i> 查看详情
+              </button>
             </div>
           </div>
         </div>
@@ -654,6 +756,90 @@ def render_music_workbench_html(
         const resolvingSpotify = ref(false);
         const resolvedEntity = ref(null);
         const submittingSub = ref(false);
+        const albumSearchQuery = ref('');
+        const collapsedAlbums = ref({{}});
+
+        const toggleAlbum = (albumName) => {{
+          collapsedAlbums.value[albumName] = !collapsedAlbums.value[albumName];
+        }};
+
+        const expandAllAlbums = () => {{
+          collapsedAlbums.value = {{}};
+        }};
+
+        const collapseAllAlbums = () => {{
+          const map = {{}};
+          for (const g of albumGroups.value) {{
+            map[g.name] = true;
+          }}
+          collapsedAlbums.value = map;
+        }};
+
+        const formatDuration = (sec) => {{
+          if (!sec || isNaN(sec)) return '--:--';
+          const m = Math.floor(sec / 60);
+          const s = Math.floor(sec % 60);
+          return `${{m.toString().padStart(2, '0')}}:${{s.toString().padStart(2, '0')}}`;
+        }};
+
+        const albumGroups = computed(() => {{
+          if (!resolvedEntity.value || !resolvedEntity.value.tracks) return [];
+          const query = albumSearchQuery.value.trim().toLowerCase();
+          const groups = [];
+          const map = new Map();
+
+          for (const t of resolvedEntity.value.tracks) {{
+            const albumName = t.album || resolvedEntity.value.name || '单曲与精选';
+            let group = map.get(albumName);
+            if (!group) {{
+              group = {{
+                name: albumName,
+                cover_url: t.cover_url || resolvedEntity.value.cover_url || '',
+                release_date: t.release_date || '',
+                tracks: [],
+              }};
+              map.set(albumName, group);
+              groups.push(group);
+            }} else {{
+              if (!group.cover_url && t.cover_url) {{
+                group.cover_url = t.cover_url;
+              }}
+              if (!group.release_date && t.release_date) {{
+                group.release_date = t.release_date;
+              }}
+            }}
+            group.tracks.push(t);
+          }}
+
+          if (!query) {{
+            return groups;
+          }}
+
+          const filtered = [];
+          for (const g of groups) {{
+            const albumMatch = g.name.toLowerCase().includes(query);
+            const matchedTracks = g.tracks.filter(t => 
+              (t.title && t.title.toLowerCase().includes(query)) ||
+              (t.artist && t.artist.toLowerCase().includes(query))
+            );
+            if (albumMatch) {{
+              filtered.push(g);
+            }} else if (matchedTracks.length > 0) {{
+              filtered.push({{
+                ...g,
+                tracks: matchedTracks,
+              }});
+            }}
+          }}
+          return filtered;
+        }});
+
+        const inspectSubscription = (sub) => {{
+          if (!sub || !sub.url) return;
+          spotifyUrl.value = sub.url;
+          activeTab.value = 'spotify';
+          handleResolveSpotify();
+        }};
 
         const handleResolveSpotify = async () => {{
           if (!spotifyUrl.value.trim()) return;
@@ -778,6 +964,14 @@ def render_music_workbench_html(
           submittingSub,
           handleResolveSpotify,
           submitSubscription,
+          albumSearchQuery,
+          collapsedAlbums,
+          toggleAlbum,
+          expandAllAlbums,
+          collapseAllAlbums,
+          formatDuration,
+          albumGroups,
+          inspectSubscription,
           tasks,
           refreshingTasks,
           activeTaskCount,
