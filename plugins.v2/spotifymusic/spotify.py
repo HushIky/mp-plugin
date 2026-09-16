@@ -155,11 +155,12 @@ def resolve_spotify_entity(
         elif kind == 'album':
             return _format_album(entity, spotify_id)
         elif kind == 'playlist':
-            return _format_playlist(entity, spotify_id)
+            return _format_playlist(entity, spotify_id, data=data, proxy=proxy)
         elif kind == 'artist':
             return _format_artist(
                 entity,
                 spotify_id,
+                data=data,
                 proxy=proxy,
                 spotify_client_id=spotify_client_id,
                 spotify_client_secret=spotify_client_secret,
@@ -173,6 +174,7 @@ def resolve_spotify_entity(
             return _format_artist(
                 {},
                 spotify_id,
+                data=data,
                 proxy=proxy,
                 spotify_client_id=spotify_client_id,
                 spotify_client_secret=spotify_client_secret,
@@ -322,8 +324,317 @@ def _format_album(entity: Dict[str, Any], spotify_id: str) -> Dict[str, Any]:
     }
 
 
-def _format_playlist(entity: Dict[str, Any], spotify_id: str) -> Dict[str, Any]:
-    """格式化播放列表。"""
+_PARTNER_API = 'https://api-partner.spotify.com/pathfinder/v1/query'
+_HASH_OVERVIEW = 'ae0e2958a4ab645b35ca19ac04d0495ae12d9c5d7b7286217674801a9aab281a'
+_HASH_DISCOGRAPHY = '5e07d323febb57b4a56a42abbf781490e58764aa45feb6e3dc0591564fc56599'
+_HASH_PLAYLIST = 'a65e12194ed5fc443a1cdebed5fabe33ca5b07b987185d63c72483867ad13cb4'
+
+_cached_anonymous_token: Optional[str] = None
+_cached_anonymous_token_expires_at: float = 0.0
+
+
+def _token_from_embed_payload(payload: Optional[Dict[str, Any]]) -> Optional[str]:
+    """从 Embed Next.js 页面数据中提取已包含的 Spotify 访问 Token。"""
+    if not isinstance(payload, dict):
+        return None
+    try:
+        return (
+            payload.get('props', {})
+            .get('pageProps', {})
+            .get('state', {})
+            .get('settings', {})
+            .get('session', {})
+            .get('accessToken')
+        )
+    except Exception:
+        return None
+
+
+def get_anonymous_spotify_token(proxy: Optional[str] = None) -> Optional[str]:
+    """获取公开 Spotify 匿名访问 Token（直接通过公开 Embed 页面生成，免任何配置）。"""
+    global _cached_anonymous_token, _cached_anonymous_token_expires_at
+    now = time.time()
+    if _cached_anonymous_token and now < _cached_anonymous_token_expires_at - 60:
+        return _cached_anonymous_token
+
+    url = 'https://open.spotify.com/embed/playlist/37i9dQZF1DXcBWIGoYBM5M'
+    proxies = {'http': proxy, 'https': proxy} if proxy else None
+    try:
+        resp = requests.get(
+            url,
+            headers={'User-Agent': _USER_AGENT, 'Accept-Language': 'en-US,en;q=0.9'},
+            proxies=proxies,
+            timeout=15,
+        )
+        resp.raise_for_status()
+        match = re.search(r'<script[^>]*id="__NEXT_DATA__"[^>]*>(.*?)</script>', resp.text, re.DOTALL)
+        if match:
+            data = json.loads(match.group(1))
+            token = _token_from_embed_payload(data)
+            if token:
+                _cached_anonymous_token = token
+                _cached_anonymous_token_expires_at = now + 3600
+                return token
+    except Exception as e:
+        logger.debug(f"获取 Spotify 匿名 Token 异常: {e}")
+    return None
+
+
+def get_graphql_artist_overview(
+    artist_id: str,
+    token: str,
+    proxy: Optional[str] = None,
+) -> Dict[str, Any]:
+    """通过 Spotify Partner GraphQL API 获取艺术家姓名与高分辨率头像。"""
+    params = {
+        'operationName': 'queryArtistOverview',
+        'variables': json.dumps({'uri': f'spotify:artist:{artist_id}', 'locale': 'zh-CN'}),
+        'extensions': json.dumps({'persistedQuery': {'version': 1, 'sha256Hash': _HASH_OVERVIEW}}),
+    }
+    proxies = {'http': proxy, 'https': proxy} if proxy else None
+    try:
+        resp = requests.get(
+            _PARTNER_API,
+            params=params,
+            headers={
+                'Authorization': f'Bearer {token}',
+                'User-Agent': _USER_AGENT,
+                'app-platform': 'WebPlayer',
+            },
+            proxies=proxies,
+            timeout=15,
+        )
+        resp.raise_for_status()
+        j = resp.json()
+        union = j.get('data', {}).get('artistUnion', {})
+        name = union.get('profile', {}).get('name') or ''
+        sources = union.get('visuals', {}).get('avatarImage', {}).get('sources') or []
+        sources.sort(key=lambda s: int(s.get('width') or 0), reverse=True)
+        cover_url = sources[0].get('url', '') if sources else ''
+        return {'name': name, 'cover_url': cover_url}
+    except Exception as e:
+        logger.debug(f"GraphQL 获取艺术家概览异常: {e}")
+        return {}
+
+
+def get_graphql_artist_releases(
+    artist_id: str,
+    token: str,
+    proxy: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """通过 Spotify Partner GraphQL API 获取艺术家全部 Releases（Albums / Singles，可达上百张）。"""
+    all_releases: List[Dict[str, Any]] = []
+    seen_ids = set()
+    proxies = {'http': proxy, 'https': proxy} if proxy else None
+
+    for rel_type in ('album', 'single'):
+        op_name = 'queryArtistDiscographyAlbums' if rel_type == 'album' else 'queryArtistDiscographySingles'
+        discog_key = 'albums' if rel_type == 'album' else 'singles'
+        offset = 0
+        limit = 100
+        while True:
+            params = {
+                'operationName': op_name,
+                'variables': json.dumps({'uri': f'spotify:artist:{artist_id}', 'offset': offset, 'limit': limit}),
+                'extensions': json.dumps({'persistedQuery': {'version': 1, 'sha256Hash': _HASH_DISCOGRAPHY}}),
+            }
+            try:
+                resp = requests.get(
+                    _PARTNER_API,
+                    params=params,
+                    headers={
+                        'Authorization': f'Bearer {token}',
+                        'User-Agent': _USER_AGENT,
+                        'app-platform': 'WebPlayer',
+                    },
+                    proxies=proxies,
+                    timeout=15,
+                )
+                resp.raise_for_status()
+                j = resp.json()
+                discog = (
+                    j.get('data', {})
+                    .get('artistUnion', {})
+                    .get('discography', {})
+                    .get(discog_key, {})
+                )
+                items = discog.get('items') or []
+                if not items:
+                    break
+                for item in items:
+                    for r_item in (item.get('releases', {}).get('items') or []):
+                        rid = r_item.get('id')
+                        if rid and rid not in seen_ids:
+                            seen_ids.add(rid)
+                            cover_sources = r_item.get('coverArt', {}).get('sources') or []
+                            cover = cover_sources[0].get('url', '') if cover_sources else ''
+                            all_releases.append({
+                                'spotify_id': rid,
+                                'name': r_item.get('name', ''),
+                                'type': rel_type,
+                                'cover_url': cover,
+                                'total_tracks': r_item.get('tracks', {}).get('totalCount') or 0,
+                                'release_date': str(r_item.get('date', {}).get('isoString') or r_item.get('date', {}).get('year') or ''),
+                            })
+                total = discog.get('totalCount') or 0
+                offset += len(items)
+                if not items or offset >= total:
+                    break
+            except Exception as e:
+                logger.debug(f"GraphQL 获取艺术家 {artist_id} {rel_type} 异常: {e}")
+                break
+    return all_releases
+
+
+def get_graphql_playlist_tracks(
+    playlist_id: str,
+    token: str,
+    proxy: Optional[str] = None,
+) -> Tuple[Optional[str], List[Dict[str, Any]]]:
+    """通过 Spotify Partner GraphQL API 获取歌单全量曲目（支持分页拉取上千首）。"""
+    songs: List[Dict[str, Any]] = []
+    playlist_name: Optional[str] = None
+    offset = 0
+    limit = 100
+    proxies = {'http': proxy, 'https': proxy} if proxy else None
+
+    while True:
+        params = {
+            'operationName': 'fetchPlaylist',
+            'variables': json.dumps({
+                'uri': f'spotify:playlist:{playlist_id}',
+                'offset': offset,
+                'limit': limit,
+                'enableWatchFeedEntrypoint': False,
+                'includeEpisodeContentRatingsV2': False,
+            }),
+            'extensions': json.dumps({'persistedQuery': {'version': 1, 'sha256Hash': _HASH_PLAYLIST}}),
+        }
+        try:
+            resp = requests.get(
+                _PARTNER_API,
+                params=params,
+                headers={
+                    'Authorization': f'Bearer {token}',
+                    'User-Agent': _USER_AGENT,
+                    'app-platform': 'WebPlayer',
+                },
+                proxies=proxies,
+                timeout=15,
+            )
+            resp.raise_for_status()
+            j = resp.json()
+            pv2 = j.get('data', {}).get('playlistV2', {})
+            if playlist_name is None:
+                playlist_name = pv2.get('name') or None
+            content = pv2.get('content', {})
+            items = content.get('items') or []
+            if not items:
+                break
+            for idx, item in enumerate(items, offset + 1):
+                iv2 = item.get('itemV2') or {}
+                if iv2.get('__typename') != 'TrackResponseWrapper':
+                    continue
+                track = iv2.get('data') or {}
+                if not isinstance(track, dict):
+                    continue
+                t_uri = track.get('uri') or ''
+                t_id = t_uri.split(':')[-1] if t_uri else ''
+                if not t_id:
+                    continue
+                artists = [
+                    a['profile']['name']
+                    for a in (track.get('artists') or {}).get('items', [])
+                    if isinstance(a, dict) and isinstance(a.get('profile'), dict) and a['profile'].get('name')
+                ]
+                artist_str = ', '.join(artists) if artists else 'Unknown Artist'
+                album = track.get('albumOfTrack') or {}
+                album_name = album.get('name', '') if isinstance(album, dict) else ''
+                cover_sources = (album.get('coverArt') or {}).get('sources') or []
+                cover_url = cover_sources[0].get('url', '') if cover_sources else ''
+                duration_ms = (track.get('trackDuration') or {}).get('totalMilliseconds') or 0
+                dur_sec = int(duration_ms / 1000) if duration_ms else 0
+
+                songs.append({
+                    'type': 'track',
+                    'spotify_id': t_id,
+                    'title': track.get('name') or f'Track {idx}',
+                    'artists': artists,
+                    'artist': artist_str,
+                    'album_artists': artists,
+                    'album_artist': artist_str,
+                    'album': album_name,
+                    'cover_url': cover_url,
+                    'duration': dur_sec,
+                    'track_number': idx,
+                    'disc_number': 1,
+                    'url': f'https://open.spotify.com/track/{t_id}',
+                })
+
+            total = content.get('totalCount') or 0
+            offset += len(items)
+            if not items or offset >= total:
+                break
+        except Exception as e:
+            logger.debug(f"GraphQL 获取歌单 {playlist_id} 曲目异常: {e}")
+            break
+    return playlist_name, songs
+
+
+def get_artist_all_tracks_via_releases(
+    releases: List[Dict[str, Any]],
+    artist_name: str,
+    max_albums: int = 150,
+    proxy: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """通过并发解析专辑 Embed 获取艺术家全量唱片下的全部曲目（可达千首以上）。"""
+    target_releases = releases[:max_albums]
+    if not target_releases:
+        return []
+
+    def _fetch_tracks_for_rel(idx: int, rel: Dict[str, Any]) -> Tuple[int, List[Dict[str, Any]]]:
+        rel_id = rel.get("spotify_id")
+        if not rel_id:
+            return idx, []
+        try:
+            album_res = resolve_spotify_entity(f"https://open.spotify.com/album/{rel_id}", proxy=proxy)
+            return idx, album_res.get("tracks") or []
+        except Exception:
+            return idx, []
+
+    all_tracks_indexed: List[Tuple[int, List[Dict[str, Any]]]] = []
+    worker_count = min(10, max(1, len(target_releases)))
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        futures = [
+            executor.submit(_fetch_tracks_for_rel, idx, rel)
+            for idx, rel in enumerate(target_releases)
+        ]
+        for f in as_completed(futures):
+            try:
+                idx, t_list = f.result()
+                all_tracks_indexed.append((idx, t_list))
+            except Exception as e:
+                logger.debug(f"并发获取唱片曲目异常: {e}")
+
+    all_tracks_indexed.sort(key=lambda x: x[0])
+    all_tracks = []
+    seen_track_ids = set()
+    for _, album_tracks in all_tracks_indexed:
+        for t in album_tracks:
+            tid = t.get("spotify_id")
+            if tid and tid not in seen_track_ids:
+                seen_track_ids.add(tid)
+                all_tracks.append(t)
+    return all_tracks
+
+
+def _format_playlist(
+    entity: Dict[str, Any],
+    spotify_id: str,
+    data: Optional[Dict[str, Any]] = None,
+    proxy: Optional[str] = None,
+) -> Dict[str, Any]:
+    """格式化播放列表（支持 GraphQL 分页获取全量上千首曲目）。"""
     playlist_name = entity.get('name') or entity.get('title', 'Unknown Playlist')
     cover_url = _extract_image_url(entity.get('coverArt')) or _extract_image_url(entity)
 
@@ -377,6 +688,18 @@ def _format_playlist(entity: Dict[str, Any], spotify_id: str) -> Dict[str, Any]:
             'url': f'https://open.spotify.com/track/{t_id}',
         })
 
+    # 尝试使用 GraphQL 分页获取完整全量曲目
+    token = _token_from_embed_payload(data) or get_anonymous_spotify_token(proxy=proxy)
+    if token:
+        try:
+            gql_name, gql_tracks = get_graphql_playlist_tracks(spotify_id, token, proxy=proxy)
+            if gql_tracks and len(gql_tracks) >= len(tracks):
+                tracks = gql_tracks
+                if gql_name:
+                    playlist_name = gql_name
+        except Exception as e:
+            logger.debug(f"通过 GraphQL 获取歌单全量曲目异常: {e}")
+
     return {
         'type': 'playlist',
         'spotify_id': spotify_id,
@@ -391,11 +714,12 @@ def _format_playlist(entity: Dict[str, Any], spotify_id: str) -> Dict[str, Any]:
 def _format_artist(
     entity: Dict[str, Any],
     spotify_id: str,
+    data: Optional[Dict[str, Any]] = None,
     proxy: Optional[str] = None,
     spotify_client_id: Optional[str] = None,
     spotify_client_secret: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """格式化艺术家，解析艺术家头像、Top Tracks 曲目列表及全部 Release 专辑与单曲。"""
+    """格式化艺术家，优先通过 Spotify Partner GraphQL / Web API 解析全量 Releases 专辑与单曲库（支持上千首）。"""
     artist_name = entity.get('name') or entity.get('title', 'Unknown Artist')
     cover_url = _extract_image_url(entity)
 
@@ -472,8 +796,32 @@ def _format_artist(
             'url': f'https://open.spotify.com/track/{t_id}',
         })
 
-    # 3. 若配置了官方 Spotify API，增强曲目与 releases
-    if spotify_client_id and spotify_client_secret:
+    # 3. 优先使用 Spotify Partner GraphQL（免配置官方 Key，直接拉取全量唱片库与千首曲目）
+    token = _token_from_embed_payload(data) or get_anonymous_spotify_token(proxy=proxy)
+    if token:
+        try:
+            overview = get_graphql_artist_overview(spotify_id, token, proxy=proxy)
+            if overview.get('name') and (artist_name == 'Unknown Artist' or not artist_name):
+                artist_name = overview['name']
+            if overview.get('cover_url') and not cover_url:
+                cover_url = overview['cover_url']
+
+            gql_releases = get_graphql_artist_releases(spotify_id, token, proxy=proxy)
+            if gql_releases:
+                all_releases = gql_releases
+
+            # 并发获取全量唱片曲目
+            if all_releases:
+                expanded_tracks = get_artist_all_tracks_via_releases(
+                    all_releases, artist_name=artist_name, max_albums=100, proxy=proxy
+                )
+                if expanded_tracks:
+                    tracks = expanded_tracks
+        except Exception as e:
+            logger.debug(f"通过 Spotify GraphQL 解析艺术家全量信息异常: {e}")
+
+    # 4. 若配置了官方 Spotify API 且前序解析为空，作为额外增强与回退
+    if (not all_releases or not tracks) and spotify_client_id and spotify_client_secret:
         try:
             if not cover_url or artist_name == 'Unknown Artist':
                 art_detail = get_spotify_artist_details(spotify_id, spotify_client_id, spotify_client_secret, proxy=proxy)
@@ -494,7 +842,6 @@ def _format_artist(
             if api_releases:
                 all_releases = api_releases
 
-            # 并发获取艺术家全量唱片下的全部曲目（可达千首以上）
             api_all_tracks = get_spotify_artist_all_tracks(
                 spotify_id,
                 spotify_client_id,

@@ -62,7 +62,7 @@ def render_music_workbench_html(
         <div>
           <h1 class="text-xl font-bold tracking-tight text-white flex items-center gap-2">
             Spotify 音乐搜索与订阅工作台
-            <span class="text-xs font-normal px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">v1.0.8</span>
+            <span class="text-xs font-normal px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">v1.1.1</span>
           </h1>
           <p class="text-xs text-slate-400">高品质音频下载 • 元数据/歌词/封面打标 • 增量订阅管理</p>
         </div>
@@ -315,9 +315,9 @@ def render_music_workbench_html(
             <h3 class="text-2xl font-bold text-white">{{{{ resolvedEntity.name }}}}</h3>
             <p class="text-xs text-slate-400">Spotify ID: {{{{ resolvedEntity.spotify_id }}}}</p>
 
-            <div v-if="resolvedEntity.type === 'artist' && (!resolvedEntity.total_releases || resolvedEntity.total_releases === 0)" class="p-3.5 rounded-xl bg-amber-500/10 border border-amber-500/20 text-xs text-amber-300 flex items-start gap-2 mt-2">
-              <i class="fa-solid fa-circle-info mt-0.5 text-amber-400"></i>
-              <span>提示：当前通过公开 Embed 解析出 Top 热门曲目。在插件设置中配置免费申请的 Spotify Client ID 与 Secret 后，即可解锁该艺术家的全量唱片库 (100+ 唱片 / 1,000+ 曲目) 解析与增量监控。</span>
+            <div v-if="resolvedEntity.type === 'artist' && resolvedEntity.total_releases > 0" class="p-3.5 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-xs text-emerald-300 flex items-start gap-2 mt-2">
+              <i class="fa-solid fa-circle-check mt-0.5 text-emerald-400"></i>
+              <span>已通过 Spotify GraphQL 接口免凭证全量解析出该艺术家的全部唱片库 ({{{{ resolvedEntity.total_releases }}}} 张唱片 / {{{{ (resolvedEntity.tracks || []).length }}}} 首曲目)。</span>
             </div>
 
             <!-- 操作选项按钮群 -->
