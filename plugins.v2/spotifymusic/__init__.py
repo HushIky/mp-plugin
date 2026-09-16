@@ -37,7 +37,7 @@ class SpotifyMusic(_PluginBase):
     plugin_name = "Spotify音乐下载与订阅"
     plugin_desc = "支持 Spotify 链接解析、音乐搜索、歌单/艺术家增量订阅、元数据标签/封面/歌词内嵌与目录自动整理。"
     plugin_icon = "spotifymusic.png"
-    plugin_version = "1.1.2"
+    plugin_version = "1.1.3"
     plugin_label = "音乐管理"
     plugin_author = "local"
     plugin_order = 10
@@ -593,12 +593,20 @@ class SpotifyMusic(_PluginBase):
                 "description": "获取所有 Spotify 歌单与艺术家订阅",
             },
             {
-                "path": "/subscriptions/add",
+                "path": "/subscribe",
                 "endpoint": self.api_add_subscription,
                 "methods": ["POST"],
                 "auth": "bear",
                 "summary": "添加订阅",
                 "description": "添加 Spotify 歌单或艺术家订阅，支持设置【仅监控新增】",
+            },
+            {
+                "path": "/subscriptions/add",
+                "endpoint": self.api_add_subscription,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "添加订阅（别名）",
+                "description": "添加 Spotify 歌单或艺术家订阅",
             },
             {
                 "path": "/subscriptions/{sub_id}",

@@ -62,7 +62,7 @@ def render_music_workbench_html(
         <div>
           <h1 class="text-xl font-bold tracking-tight text-white flex items-center gap-2">
             Spotify 音乐搜索与订阅工作台
-            <span class="text-xs font-normal px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">v1.1.2</span>
+            <span class="text-xs font-normal px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">v1.1.3</span>
           </h1>
           <p class="text-xs text-slate-400">高品质音频下载 • 元数据/歌词/封面打标 • 增量订阅管理</p>
         </div>
@@ -692,9 +692,21 @@ def render_music_workbench_html(
             if (res.status === 401) {{
               showTokenModal.value = true;
               showToast('请配置 MoviePilot API Token 以进行鉴权', 'error');
-              throw new Error('未授权');
+              throw new Error('未授权 (401)');
             }}
-            const data = await res.json();
+            let data;
+            try {{
+              data = await res.json();
+            }} catch (jsonErr) {{
+              data = null;
+            }}
+            if (!res.ok) {{
+              const errMsg = (data && (data.detail || data.message)) || `请求失败 (${{res.status}})`;
+              throw new Error(errMsg);
+            }}
+            if (data && data.success === false) {{
+              throw new Error(data.message || '操作失败');
+            }}
             return data;
           }} catch (err) {{
             console.error('API Error:', err);
