@@ -233,7 +233,7 @@ class DownloadQueueManager:
                     status="downloaded",
                     file_path=str(final_audio),
                 )
-                self.db.update_subscription_stats(job.subscription_id, total_tracks=0, downloaded_increment=1)
+                self.db.update_subscription_stats(job.subscription_id, downloaded_increment=1)
 
             # 触发完成回调 (如系统通知或媒体库刷新)
             if self.on_task_completed:

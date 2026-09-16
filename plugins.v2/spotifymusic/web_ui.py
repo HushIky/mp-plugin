@@ -62,7 +62,7 @@ def render_music_workbench_html(
         <div>
           <h1 class="text-xl font-bold tracking-tight text-white flex items-center gap-2">
             Spotify 音乐搜索与订阅工作台
-            <span class="text-xs font-normal px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">v1.1.3</span>
+            <span class="text-xs font-normal px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">v1.1.4</span>
           </h1>
           <p class="text-xs text-slate-400">高品质音频下载 • 元数据/歌词/封面打标 • 增量订阅管理</p>
         </div>
@@ -469,7 +469,7 @@ def render_music_workbench_html(
 
     <!-- TAB 3: 实时下载任务与队列监控 -->
     <main v-if="activeTab === 'tasks'" class="space-y-6">
-      <div class="glass rounded-2xl p-6 flex items-center justify-between">
+      <div class="glass rounded-2xl p-6 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <h2 class="text-base font-bold text-white flex items-center gap-2">
             <i class="fa-solid fa-list-check text-emerald-400"></i>
@@ -477,10 +477,32 @@ def render_music_workbench_html(
           </h2>
           <p class="text-xs text-slate-400 mt-1">自动执行：音频检索 ➔ yt-dlp高品质下载 ➔ 歌词与元数据内嵌 ➔ 目录整理归档</p>
         </div>
-        <button @click="fetchTasks" class="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs text-slate-300 transition flex items-center gap-2">
-          <i class="fa-solid fa-rotate" :class="{{ 'fa-spin': refreshingTasks }}"></i>
-          刷新
-        </button>
+        <div class="flex items-center gap-2 flex-wrap">
+          <button 
+            v-if="failedTaskCount > 0"
+            @click="retryFailedTasks" 
+            :disabled="retryingFailed"
+            class="px-3 py-2 rounded-xl bg-rose-950/60 hover:bg-rose-900/80 border border-rose-800 text-xs text-rose-300 transition flex items-center gap-1.5"
+            title="重试所有失败任务"
+          >
+            <i class="fa-solid fa-rotate-left" :class="{{ 'fa-spin': retryingFailed }}"></i>
+            重试失败 ({{{{ failedTaskCount }}}})
+          </button>
+          <button 
+            v-if="completedTaskCount > 0"
+            @click="clearCompletedTasks" 
+            :disabled="clearingCompleted"
+            class="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs text-slate-300 transition flex items-center gap-1.5"
+            title="清理已完成的历史任务"
+          >
+            <i class="fa-solid fa-broom"></i>
+            清理已完成
+          </button>
+          <button @click="fetchTasks" class="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs text-slate-300 transition flex items-center gap-2">
+            <i class="fa-solid fa-rotate" :class="{{ 'fa-spin': refreshingTasks }}"></i>
+            刷新
+          </button>
+        </div>
       </div>
 
       <!-- 任务列表 -->
@@ -521,7 +543,7 @@ def render_music_workbench_html(
                   :style="{{ width: (task.progress || 0) + '%' }}"
                 ></div>
               </div>
-              <p v-if="task.error" class="text-[10px] text-rose-400 truncate mt-1" :title="task.error">{{{{ task.error }}}}</p>
+              <p v-if="task.error_msg || task.error" class="text-[10px] text-rose-400 truncate mt-1" :title="task.error_msg || task.error">{{{{ task.error_msg || task.error }}}}</p>
             </div>
 
             <span 
@@ -576,9 +598,9 @@ def render_music_workbench_html(
                 </span>
                 <span 
                   class="px-2 py-0.5 rounded text-[10px] font-bold"
-                  :class="sub.sync_mode === 'only_new' ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' : 'bg-blue-500/20 text-blue-400 border border-blue-500/30'"
+                  :class="sub.sync_mode === 'only_new' ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' : (sub.sync_mode === 'once' ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30' : 'bg-blue-500/20 text-blue-400 border border-blue-500/30')"
                 >
-                  {{{{ sub.sync_mode === 'only_new' ? '🌿 仅监控新增' : '📦 全量订阅' }}}}
+                  {{{{ sub.sync_mode === 'only_new' ? '🌿 仅监控新增' : (sub.sync_mode === 'once' ? '⚡ 单次下载' : '📦 全量订阅') }}}}
                 </span>
               </div>
               <h3 class="font-bold text-white text-base truncate mt-1" :title="sub.name">{{{{ sub.name }}}}</h3>
@@ -586,20 +608,36 @@ def render_music_workbench_html(
             </div>
           </div>
 
-          <div class="pt-3 border-t border-slate-700/50 flex items-center justify-between text-xs text-slate-400">
+          <div class="pt-3 border-t border-slate-700/50 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-400">
             <div>
               已下载: <b class="text-white">{{{{ sub.downloaded_tracks || 0 }}}}</b> / {{{{ sub.total_tracks || 0 }}}} 首
             </div>
-            <div class="flex items-center gap-2.5">
-              <span class="text-[11px] text-slate-500">
-                上次检查: {{{{ sub.last_check ? sub.last_check.slice(0, 16) : '未执行' }}}}
+            <div class="flex items-center gap-2">
+              <span class="text-[11px] text-slate-500 hidden sm:inline">
+                上次: {{{{ (sub.last_checked || sub.last_check) ? (sub.last_checked || sub.last_check).slice(0, 16).replace('T', ' ') : '未执行' }}}}
               </span>
               <button 
                 @click="inspectSubscription(sub)" 
-                class="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-emerald-400 hover:text-emerald-300 border border-slate-700 transition text-[11px] flex items-center gap-1"
+                class="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 transition text-[11px] flex items-center gap-1"
                 title="查看专辑与曲目预览"
               >
-                <i class="fa-solid fa-eye"></i> 查看详情
+                <i class="fa-solid fa-eye"></i> 预览
+              </button>
+              <button 
+                @click="syncSubscription(sub)" 
+                :disabled="syncingSubMap[sub.id]"
+                class="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-emerald-400 hover:text-emerald-300 border border-slate-700 transition text-[11px] flex items-center gap-1"
+                title="立即触发增量检查"
+              >
+                <i class="fa-solid fa-rotate" :class="{{ 'fa-spin': syncingSubMap[sub.id] }}"></i> 立即检查
+              </button>
+              <button 
+                @click="deleteSubscription(sub)" 
+                :disabled="deletingSubMap[sub.id]"
+                class="px-2.5 py-1 rounded bg-rose-950/40 hover:bg-rose-900/60 text-rose-400 hover:text-rose-300 border border-rose-900/50 transition text-[11px] flex items-center gap-1"
+                title="删除此订阅"
+              >
+                <i class="fa-solid fa-trash-can"></i> 删除
               </button>
             </div>
           </div>
@@ -894,8 +932,17 @@ def render_music_workbench_html(
         // TAB 3: 任务
         const tasks = ref([]);
         const refreshingTasks = ref(false);
+        const clearingCompleted = ref(false);
+        const retryingFailed = ref(false);
+
         const activeTaskCount = computed(() => {{
-          return tasks.value.filter(t => t.status === 'pending' || t.status === 'downloading' || t.status === 'tagging').length;
+          return tasks.value.filter(t => t.status === 'pending' || t.status === 'downloading' || t.status === 'tagging' || t.status === 'matching' || t.status === 'processing').length;
+        }});
+        const completedTaskCount = computed(() => {{
+          return tasks.value.filter(t => t.status === 'completed').length;
+        }});
+        const failedTaskCount = computed(() => {{
+          return tasks.value.filter(t => t.status === 'failed').length;
         }});
 
         const fetchTasks = async () => {{
@@ -912,10 +959,38 @@ def render_music_workbench_html(
           }}
         }};
 
+        const clearCompletedTasks = async () => {{
+          clearingCompleted.value = true;
+          try {{
+            const res = await request('/tasks/clear_completed', {{ method: 'POST' }});
+            showToast(res.message || '已清理已完成任务');
+            fetchTasks();
+          }} catch (e) {{
+            showToast('清理失败: ' + e.message, 'error');
+          }} finally {{
+            clearingCompleted.value = false;
+          }}
+        }};
+
+        const retryFailedTasks = async () => {{
+          retryingFailed.value = true;
+          try {{
+            const res = await request('/tasks/retry_failed', {{ method: 'POST' }});
+            showToast(res.message || '已重新排队失败任务');
+            fetchTasks();
+          }} catch (e) {{
+            showToast('重试失败: ' + e.message, 'error');
+          }} finally {{
+            retryingFailed.value = false;
+          }}
+        }};
+
         const getStatusText = (st) => {{
           const map = {{
             pending: '排队中',
+            matching: '音轨检索中',
             downloading: '正在下载音频',
+            processing: '正在整理归档',
             tagging: '内嵌元数据与歌词',
             completed: '已完成并归档',
             failed: '处理失败'
@@ -926,7 +1001,9 @@ def render_music_workbench_html(
         const getStatusBadgeClass = (st) => {{
           const map = {{
             pending: 'bg-slate-700 text-slate-300',
+            matching: 'bg-purple-500/20 text-purple-300 border border-purple-500/30',
             downloading: 'bg-amber-500/20 text-amber-300 border border-amber-500/30',
+            processing: 'bg-blue-500/20 text-blue-300 border border-blue-500/30',
             tagging: 'bg-blue-500/20 text-blue-300 border border-blue-500/30',
             completed: 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30',
             failed: 'bg-rose-500/20 text-rose-400 border border-rose-500/30'
@@ -936,6 +1013,9 @@ def render_music_workbench_html(
 
         // TAB 4: 订阅列表
         const subscriptions = ref([]);
+        const syncingSubMap = ref({{}});
+        const deletingSubMap = ref({{}});
+
         const fetchSubscriptions = async () => {{
           try {{
             const res = await request('/subscriptions');
@@ -944,6 +1024,37 @@ def render_music_workbench_html(
             }}
           }} catch (e) {{
             // 静默
+          }}
+        }};
+
+        const syncSubscription = async (sub) => {{
+          if (!sub || !sub.id) return;
+          syncingSubMap.value[sub.id] = true;
+          try {{
+            const res = await request(`/subscriptions/${{sub.id}}/sync`, {{ method: 'POST' }});
+            showToast(res.message || `正在后台检查【${{sub.name}}】`);
+            setTimeout(fetchTasks, 1000);
+          }} catch (e) {{
+            showToast('触发检查失败: ' + e.message, 'error');
+          }} finally {{
+            syncingSubMap.value[sub.id] = false;
+          }}
+        }};
+
+        const deleteSubscription = async (sub) => {{
+          if (!sub || !sub.id) return;
+          if (!confirm(`确定要删除订阅【${{sub.name}}】吗？此操作不会删除已下载的本地音乐文件。`)) {{
+            return;
+          }}
+          deletingSubMap.value[sub.id] = true;
+          try {{
+            await request(`/subscriptions/${{sub.id}}`, {{ method: 'DELETE' }});
+            showToast(`已成功删除订阅【${{sub.name}}】`);
+            fetchSubscriptions();
+          }} catch (e) {{
+            showToast('删除订阅失败: ' + e.message, 'error');
+          }} finally {{
+            deletingSubMap.value[sub.id] = false;
           }}
         }};
 
@@ -986,12 +1097,22 @@ def render_music_workbench_html(
           inspectSubscription,
           tasks,
           refreshingTasks,
+          clearingCompleted,
+          retryingFailed,
           activeTaskCount,
+          completedTaskCount,
+          failedTaskCount,
           fetchTasks,
+          clearCompletedTasks,
+          retryFailedTasks,
           getStatusText,
           getStatusBadgeClass,
           subscriptions,
+          syncingSubMap,
+          deletingSubMap,
           fetchSubscriptions,
+          syncSubscription,
+          deleteSubscription,
           showTokenModal,
           tokenInput,
           saveToken,

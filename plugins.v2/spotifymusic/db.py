@@ -146,23 +146,34 @@ class MusicDatabase:
     def update_subscription_stats(
         self,
         sub_id: int,
-        total_tracks: int,
+        total_tracks: Optional[int] = None,
         downloaded_increment: int = 0,
         last_checked: Optional[str] = None,
     ) -> None:
-        """更新订阅的统计与检查时间。"""
+        """更新订阅的统计与检查时间。若 total_tracks 为 None 或 <= 0 则保持原曲目总数不覆盖。"""
         check_time = last_checked or _now_iso()
         with self._lock, self._connect() as conn:
-            conn.execute(
-                """
-                UPDATE subscriptions
-                SET total_tracks = ?,
-                    downloaded_tracks = downloaded_tracks + ?,
-                    last_checked = ?
-                WHERE id = ?
-                """,
-                (total_tracks, downloaded_increment, check_time, sub_id),
-            )
+            if total_tracks is not None and total_tracks > 0:
+                conn.execute(
+                    """
+                    UPDATE subscriptions
+                    SET total_tracks = ?,
+                        downloaded_tracks = downloaded_tracks + ?,
+                        last_checked = ?
+                    WHERE id = ?
+                    """,
+                    (total_tracks, downloaded_increment, check_time, sub_id),
+                )
+            else:
+                conn.execute(
+                    """
+                    UPDATE subscriptions
+                    SET downloaded_tracks = downloaded_tracks + ?,
+                        last_checked = ?
+                    WHERE id = ?
+                    """,
+                    (downloaded_increment, check_time, sub_id),
+                )
 
     # ==================== 订阅历史 (History & Deduplication) ====================
 
