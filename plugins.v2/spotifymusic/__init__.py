@@ -46,6 +46,8 @@ class SpotifyMusic(_PluginBase):
     _interval_minutes: int = 60
     _max_parallel: int = 3
     _proxy: str = ""
+    _spotify_client_id: str = ""
+    _spotify_client_secret: str = ""
 
     _db: Optional[MusicDatabase] = None
     _queue_mgr: Optional[DownloadQueueManager] = None
@@ -70,6 +72,8 @@ class SpotifyMusic(_PluginBase):
         self._interval_minutes = int(config.get("interval_minutes") or 60)
         self._max_parallel = int(config.get("max_parallel") or 3)
         self._proxy = str(config.get("proxy") or "").strip()
+        self._spotify_client_id = str(config.get("spotify_client_id") or "").strip()
+        self._spotify_client_secret = str(config.get("spotify_client_secret") or "").strip()
 
         # 初始化专属数据库
         data_path = self.get_data_path()
@@ -378,6 +382,40 @@ class SpotifyMusic(_PluginBase):
                         "content": [
                             {
                                 "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "spotify_client_id",
+                                            "label": "Spotify Client ID (可选，用于官方搜索 API)",
+                                            "placeholder": "在 developer.spotify.com 免费申请",
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "spotify_client_secret",
+                                            "label": "Spotify Client Secret (可选)",
+                                            "placeholder": "Spotify 开发者密钥",
+                                            "type": "password",
+                                        },
+                                    }
+                                ],
+                            },
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
                                 "props": {"cols": 12},
                                 "content": [
                                     {
@@ -409,6 +447,8 @@ class SpotifyMusic(_PluginBase):
             "interval_minutes": 60,
             "max_parallel": 3,
             "proxy": "",
+            "spotify_client_id": "",
+            "spotify_client_secret": "",
         }
         return form_schema, default_config
 
@@ -602,8 +642,14 @@ class SpotifyMusic(_PluginBase):
         return HTMLResponse(content=render_music_workbench_html())
 
     def api_search_query(self, query: str = "", limit: int = 15) -> Dict[str, Any]:
-        """搜索歌曲候选项列表。"""
-        candidates = matcher.search_music_candidates(query, limit=limit, proxy=self._proxy or None)
+        """搜索歌曲候选项列表（优先使用配置的 Spotify 官方 API，回退至 YouTube Music）。"""
+        candidates = matcher.search_music_candidates(
+            query=query,
+            limit=limit,
+            proxy=self._proxy or None,
+            spotify_client_id=self._spotify_client_id or None,
+            spotify_client_secret=self._spotify_client_secret or None,
+        )
         return {"code": 0, "msg": "ok", "data": candidates}
 
     # ==================== API 路由处理逻辑 ====================

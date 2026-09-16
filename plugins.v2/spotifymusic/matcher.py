@@ -177,14 +177,34 @@ def search_music_candidates(
     query: str,
     limit: int = 15,
     proxy: Optional[str] = None,
+    spotify_client_id: Optional[str] = None,
+    spotify_client_secret: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """
-    搜索音乐候选列表，返回包含标题、艺术家、专辑、封面、时长的结构化字典。
+    搜索音乐候选列表，优先通过 Spotify 官方 API（如果配置了凭据），
+    否则通过 YouTube Music API 或 yt-dlp 进行免登录检索。
     """
     query = (query or "").strip()
     if not query:
         return []
 
+    # 1. 若配置了 Spotify 开发者凭据，优先使用 Spotify 官方搜索
+    if spotify_client_id and spotify_client_secret:
+        try:
+            from . import spotify
+            sp_results = spotify.search_spotify_tracks(
+                query=query,
+                client_id=spotify_client_id,
+                client_secret=spotify_client_secret,
+                limit=limit,
+                proxy=proxy,
+            )
+            if sp_results:
+                return sp_results
+        except Exception as e:
+            logger.debug(f"Spotify 官方搜索跳过: {e}")
+
+    # 2. 默认零配置回退：YouTube Music 官方搜索
     candidates: List[Dict[str, Any]] = []
     ytm = get_ytm_client()
     if ytm:
@@ -230,7 +250,7 @@ def search_music_candidates(
         except Exception as e:
             logger.debug(f"YTMusic 搜索候选异常: {e}")
 
-    # 回退 yt-dlp 搜索
+    # 3. 回退 yt-dlp 搜索
     if not _HAS_YTDLP:
         return candidates
 
@@ -279,4 +299,5 @@ def search_music_candidates(
         logger.warning(f"yt-dlp 搜索候选失败: {e}")
 
     return candidates
+
 

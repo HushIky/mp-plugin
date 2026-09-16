@@ -6,8 +6,10 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import re
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
@@ -348,3 +350,119 @@ def _format_artist(entity: Dict[str, Any], spotify_id: str, proxy: Optional[str]
         'total_tracks': 0,
         'url': f'https://open.spotify.com/artist/{spotify_id}',
     }
+
+
+_spotify_token: Optional[str] = None
+_spotify_token_expires_at: float = 0.0
+
+
+def get_spotify_access_token(
+    client_id: str,
+    client_secret: str,
+    proxy: Optional[str] = None,
+) -> Optional[str]:
+    """使用 Client Credentials Flow 获取官方 Spotify Access Token。"""
+    global _spotify_token, _spotify_token_expires_at
+    if not client_id or not client_secret:
+        return None
+    now = time.time()
+    if _spotify_token and now < _spotify_token_expires_at - 60:
+        return _spotify_token
+
+    url = "https://accounts.spotify.com/api/token"
+    raw_creds = f"{client_id.strip()}:{client_secret.strip()}".encode("utf-8")
+    auth_header = base64.b64encode(raw_creds).decode("utf-8")
+    proxies = {"http": proxy, "https": proxy} if proxy else None
+    try:
+        resp = requests.post(
+            url,
+            headers={
+                "Authorization": f"Basic {auth_header}",
+                "Content-Type": "application/x-www-form-urlencoded",
+                "User-Agent": _USER_AGENT,
+            },
+            data={"grant_type": "client_credentials"},
+            proxies=proxies,
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        _spotify_token = data.get("access_token")
+        expires_in = int(data.get("expires_in") or 3600)
+        _spotify_token_expires_at = now + expires_in
+        return _spotify_token
+    except Exception as e:
+        logger.warning(f"获取 Spotify 官方 Access Token 失败: {e}")
+        return None
+
+
+def search_spotify_tracks(
+    query: str,
+    client_id: str,
+    client_secret: str,
+    limit: int = 15,
+    proxy: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """调用 Spotify 官方 API 搜索曲目。"""
+    token = get_spotify_access_token(client_id, client_secret, proxy=proxy)
+    if not token:
+        return []
+
+    url = "https://api.spotify.com/v1/search"
+    proxies = {"http": proxy, "https": proxy} if proxy else None
+    try:
+        resp = requests.get(
+            url,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "User-Agent": _USER_AGENT,
+            },
+            params={"q": query, "type": "track", "limit": limit},
+            proxies=proxies,
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        items = data.get("tracks", {}).get("items") or []
+        results = []
+        for item in items:
+            artists_list = [
+                a.get("name", "")
+                for a in (item.get("artists") or [])
+                if isinstance(a, dict) and a.get("name")
+            ]
+            artist_str = ", ".join(artists_list) if artists_list else "未知艺术家"
+            album_info = item.get("album") or {}
+            album_artists_list = [
+                a.get("name", "")
+                for a in (album_info.get("artists") or [])
+                if isinstance(a, dict) and a.get("name")
+            ]
+            album_artist_str = (
+                ", ".join(album_artists_list) if album_artists_list else artist_str
+            )
+            album_images = album_info.get("images") or []
+            cover_url = album_images[0].get("url") if album_images else ""
+            dur_ms = item.get("duration_ms") or 0
+            dur_sec = dur_ms // 1000
+            m, s = divmod(dur_sec, 60)
+            dur_str = f"{m:02d}:{s:02d}"
+
+            results.append({
+                "id": item.get("id"),
+                "spotify_id": item.get("id"),
+                "title": item.get("name"),
+                "artist": artist_str,
+                "album": album_info.get("name") or "",
+                "album_artist": album_artist_str,
+                "duration": dur_sec,
+                "duration_str": dur_str,
+                "cover_url": cover_url,
+                "source": "spotify",
+                "url": f"https://open.spotify.com/track/{item.get('id')}",
+            })
+        return results
+    except Exception as e:
+        logger.warning(f"Spotify 官方搜索异常: {e}")
+        return []
+
