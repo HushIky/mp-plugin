@@ -58,7 +58,7 @@ def render_music_workbench_html(plugin_name: str = "Spotify 音乐工作台", ap
         <div>
           <h1 class="text-xl font-bold tracking-tight text-white flex items-center gap-2">
             Spotify 音乐搜索与订阅工作台
-            <span class="text-xs font-normal px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">v1.0.4</span>
+            <span class="text-xs font-normal px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">v1.0.7</span>
           </h1>
           <p class="text-xs text-slate-400">高品质音频下载 • 元数据/歌词/封面打标 • 增量订阅管理</p>
         </div>
@@ -75,9 +75,9 @@ def render_music_workbench_html(plugin_name: str = "Spotify 音乐工作台", ap
             class="px-4 py-2 rounded-lg text-sm font-medium transition flex items-center gap-2"
           >
             <i :class="tab.icon"></i>
-            {{ tab.name }}
+            {{{{ tab.name }}}}
             <span v-if="tab.id === 'tasks' && activeTaskCount > 0" class="px-1.5 py-0.5 text-xs rounded-full bg-emerald-400 text-slate-900 font-bold">
-              {{ activeTaskCount }}
+              {{{{ activeTaskCount }}}}
             </span>
           </button>
         </div>
