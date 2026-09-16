@@ -191,68 +191,295 @@ def render_music_workbench_html(
         </form>
       </div>
 
-      <!-- 搜索结果列表 -->
-      <div v-if="searchResults.length > 0" class="space-y-4">
-        <div class="flex items-center justify-between px-1">
-          <h2 class="text-base font-semibold text-slate-300">
-            搜索结果 (共 {{{{ searchResults.length }}}} 首候选)
-          </h2>
-          <span class="text-xs text-slate-400">点击“一键下载”将自动匹配最佳音源、内嵌元数据与歌词并归档</span>
-        </div>
+      <!-- 分类筛选导航栏 (分栏展示) -->
+      <div v-if="totalResultsCount > 0" class="flex flex-wrap items-center gap-2">
+        <button 
+          @click="searchCategory = 'all'"
+          class="px-4 py-2 rounded-xl text-xs font-medium transition flex items-center gap-1.5"
+          :class="searchCategory === 'all' ? 'bg-emerald-600 text-white shadow-lg shadow-emerald-900/30' : 'glass hover:bg-slate-700/50 text-slate-300'"
+        >
+          <i class="fa-solid fa-border-all"></i>
+          <span>全部 ({{{{ totalResultsCount }}}})</span>
+        </button>
+        <button 
+          v-if="searchResults.tracks?.length > 0"
+          @click="searchCategory = 'tracks'"
+          class="px-4 py-2 rounded-xl text-xs font-medium transition flex items-center gap-1.5"
+          :class="searchCategory === 'tracks' ? 'bg-emerald-600 text-white shadow-lg shadow-emerald-900/30' : 'glass hover:bg-slate-700/50 text-slate-300'"
+        >
+          <i class="fa-solid fa-music"></i>
+          <span>单曲 ({{{{ searchResults.tracks.length }}}})</span>
+        </button>
+        <button 
+          v-if="searchResults.albums?.length > 0"
+          @click="searchCategory = 'albums'"
+          class="px-4 py-2 rounded-xl text-xs font-medium transition flex items-center gap-1.5"
+          :class="searchCategory === 'albums' ? 'bg-emerald-600 text-white shadow-lg shadow-emerald-900/30' : 'glass hover:bg-slate-700/50 text-slate-300'"
+        >
+          <i class="fa-solid fa-compact-disc"></i>
+          <span>专辑 ({{{{ searchResults.albums.length }}}})</span>
+        </button>
+        <button 
+          v-if="searchResults.artists?.length > 0"
+          @click="searchCategory = 'artists'"
+          class="px-4 py-2 rounded-xl text-xs font-medium transition flex items-center gap-1.5"
+          :class="searchCategory === 'artists' ? 'bg-emerald-600 text-white shadow-lg shadow-emerald-900/30' : 'glass hover:bg-slate-700/50 text-slate-300'"
+        >
+          <i class="fa-solid fa-user-pen"></i>
+          <span>艺术家 ({{{{ searchResults.artists.length }}}})</span>
+        </button>
+        <button 
+          v-if="searchResults.playlists?.length > 0"
+          @click="searchCategory = 'playlists'"
+          class="px-4 py-2 rounded-xl text-xs font-medium transition flex items-center gap-1.5"
+          :class="searchCategory === 'playlists' ? 'bg-emerald-600 text-white shadow-lg shadow-emerald-900/30' : 'glass hover:bg-slate-700/50 text-slate-300'"
+        >
+          <i class="fa-solid fa-list-music"></i>
+          <span>歌单 ({{{{ searchResults.playlists.length }}}})</span>
+        </button>
+      </div>
 
-        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          <div 
-            v-for="(item, idx) in searchResults" 
-            :key="item.id || idx"
-            class="glass-card rounded-2xl p-4 flex flex-col justify-between"
-          >
-            <div class="flex gap-4">
-              <!-- 封面 -->
-              <div class="w-20 h-20 rounded-xl overflow-hidden bg-slate-800 flex-shrink-0 relative">
-                <img v-if="item.cover_url" :src="item.cover_url" :alt="item.title" class="w-full h-full object-cover">
-                <div v-else class="w-full h-full flex items-center justify-center text-slate-600 text-2xl">
-                  <i class="fa-solid fa-music"></i>
+      <!-- 搜索结果区 -->
+      <div v-if="totalResultsCount > 0" class="space-y-8">
+        <!-- 1. 艺术家 分栏 -->
+        <div v-if="(searchCategory === 'all' || searchCategory === 'artists') && searchResults.artists?.length > 0" class="space-y-3">
+          <div class="flex items-center justify-between">
+            <h2 class="text-base font-semibold text-white flex items-center gap-2">
+              <i class="fa-solid fa-user-pen text-emerald-400"></i>
+              <span>艺术家 ({{{{ searchResults.artists.length }}}})</span>
+            </h2>
+            <span class="text-xs text-slate-400">支持一键增量订阅，自动监控歌手最新发行的唱片与单曲</span>
+          </div>
+          <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            <div 
+              v-for="item in searchResults.artists" 
+              :key="item.id || item.url"
+              class="glass-card rounded-2xl p-4 flex flex-col justify-between"
+            >
+              <div class="flex items-center gap-4">
+                <div class="w-16 h-16 rounded-full overflow-hidden bg-slate-800 flex-shrink-0 relative border-2 border-emerald-500/20">
+                  <img v-if="item.avatar_url" :src="item.avatar_url" :alt="item.name" class="w-full h-full object-cover">
+                  <div v-else class="w-full h-full flex items-center justify-center text-slate-600 text-xl">
+                    <i class="fa-solid fa-user"></i>
+                  </div>
                 </div>
-                <span v-if="item.duration_str" class="absolute bottom-1 right-1 px-1.5 py-0.5 rounded bg-black/70 text-[10px] text-white">
-                  {{{{ item.duration_str }}}}
-                </span>
+                <div class="flex-1 min-w-0">
+                  <div class="flex items-center gap-1.5">
+                    <h3 class="font-bold text-white text-base truncate" :title="item.name">{{{{ item.name }}}}</h3>
+                    <i v-if="item.verified" class="fa-solid fa-circle-check text-blue-400 text-xs flex-shrink-0" title="认证艺术家"></i>
+                  </div>
+                  <div class="mt-2 flex items-center gap-2">
+                    <span 
+                      class="text-[10px] px-2 py-0.5 rounded-full border flex items-center gap-1"
+                      :class="item.source === 'spotify' ? 'bg-emerald-950/60 text-emerald-400 border-emerald-800/80' : 'bg-slate-800 text-slate-400 border-slate-700'"
+                    >
+                      <i v-if="item.source === 'spotify'" class="fa-brands fa-spotify text-emerald-400"></i>
+                      <span>{{{{ item.source === 'spotify' ? 'Spotify' : 'YouTube Music' }}}}</span>
+                    </span>
+                    <a v-if="item.url" :href="item.url" target="_blank" class="text-xs text-slate-500 hover:text-emerald-400 transition" title="在网页中打开">
+                      <i class="fa-solid fa-arrow-up-right-from-square"></i>
+                    </a>
+                  </div>
+                </div>
               </div>
-
-              <!-- 曲目信息 -->
-              <div class="flex-1 min-w-0">
-                <h3 class="font-bold text-white text-base truncate" :title="item.title">{{{{ item.title }}}}</h3>
-                <p class="text-xs text-emerald-400 truncate mt-0.5" :title="item.artist">
-                  <i class="fa-solid fa-user-pen mr-1 opacity-70"></i>{{{{ item.artist }}}}
-                </p>
-                <p v-if="item.album" class="text-xs text-slate-400 truncate mt-0.5" :title="item.album">
-                  <i class="fa-solid fa-compact-disc mr-1 opacity-70"></i>{{{{ item.album }}}}
-                </p>
-                <div class="mt-2 flex items-center gap-2">
-                  <span 
-                    class="text-[10px] px-2 py-0.5 rounded-full border flex items-center gap-1"
-                    :class="item.source === 'spotify' ? 'bg-emerald-950/60 text-emerald-400 border-emerald-800/80' : 'bg-slate-800 text-slate-400 border-slate-700'"
-                  >
-                    <i v-if="item.source === 'spotify'" class="fa-brands fa-spotify text-emerald-400"></i>
-                    <i v-else-if="item.source === 'ytmusic'" class="fa-brands fa-youtube text-red-400"></i>
-                    <span>{{{{ item.source === 'spotify' ? 'Spotify' : (item.source === 'ytmusic' ? 'YouTube Music' : 'YouTube') }}}}</span>
-                  </span>
-                </div>
+              <div class="mt-4 pt-3 border-t border-slate-700/50 flex items-center justify-end gap-2">
+                <button 
+                  @click="subscribeEntity(item, 'only_new')"
+                  :disabled="subscribingMap[item.id || item.url]"
+                  class="px-3 py-1.5 rounded-lg text-xs font-medium transition flex items-center gap-1 bg-emerald-600 hover:bg-emerald-500 text-white shadow-sm"
+                >
+                  <i v-if="subscribingMap[item.id || item.url]" class="fa-solid fa-spinner fa-spin"></i>
+                  <i v-else class="fa-solid fa-rss"></i>
+                  <span>仅监控新增</span>
+                </button>
+                <button 
+                  @click="subscribeEntity(item, 'full')"
+                  :disabled="subscribingMap[item.id || item.url]"
+                  class="px-3 py-1.5 rounded-lg text-xs font-medium transition flex items-center gap-1 bg-slate-700 hover:bg-slate-600 text-slate-200"
+                >
+                  <span>全量同步</span>
+                </button>
               </div>
             </div>
+          </div>
+        </div>
 
-            <!-- 操作按钮 -->
-            <div class="mt-4 pt-3 border-t border-slate-700/50 flex items-center justify-end">
-              <button 
-                @click="downloadTrack(item)"
-                :disabled="downloadingMap[item.id]"
-                class="px-4 py-1.5 rounded-lg text-xs font-medium transition flex items-center gap-1.5"
-                :class="downloadedMap[item.id] ? 'bg-emerald-950/60 text-emerald-400 border border-emerald-800' : 'bg-emerald-600 hover:bg-emerald-500 text-white'"
-              >
-                <i v-if="downloadingMap[item.id]" class="fa-solid fa-spinner fa-spin"></i>
-                <i v-else-if="downloadedMap[item.id]" class="fa-solid fa-check"></i>
-                <i v-else class="fa-solid fa-download"></i>
-                <span>{{{{ downloadingMap[item.id] ? '提交中...' : (downloadedMap[item.id] ? '已加入队列' : '一键下载') }}}}</span>
-              </button>
+        <!-- 2. 专辑 分栏 -->
+        <div v-if="(searchCategory === 'all' || searchCategory === 'albums') && searchResults.albums?.length > 0" class="space-y-3">
+          <div class="flex items-center justify-between">
+            <h2 class="text-base font-semibold text-white flex items-center gap-2">
+              <i class="fa-solid fa-compact-disc text-emerald-400"></i>
+              <span>专辑 ({{{{ searchResults.albums.length }}}})</span>
+            </h2>
+            <span class="text-xs text-slate-400">支持一键订阅/批量下载整张专辑</span>
+          </div>
+          <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            <div 
+              v-for="item in searchResults.albums" 
+              :key="item.id || item.url"
+              class="glass-card rounded-2xl p-4 flex flex-col justify-between"
+            >
+              <div class="flex gap-4">
+                <div class="w-20 h-20 rounded-xl overflow-hidden bg-slate-800 flex-shrink-0 relative">
+                  <img v-if="item.cover_url" :src="item.cover_url" :alt="item.title" class="w-full h-full object-cover">
+                  <div v-else class="w-full h-full flex items-center justify-center text-slate-600 text-2xl">
+                    <i class="fa-solid fa-compact-disc"></i>
+                  </div>
+                </div>
+                <div class="flex-1 min-w-0">
+                  <h3 class="font-bold text-white text-base truncate" :title="item.title">{{{{ item.title }}}}</h3>
+                  <p class="text-xs text-emerald-400 truncate mt-0.5" :title="item.artist">
+                    <i class="fa-solid fa-user-pen mr-1 opacity-70"></i>{{{{ item.artist }}}}
+                  </p>
+                  <p v-if="item.year" class="text-xs text-slate-400 mt-0.5">
+                    <i class="fa-regular fa-calendar mr-1 opacity-70"></i>{{{{ item.year }}}} 年发行
+                  </p>
+                  <div class="mt-2 flex items-center gap-2">
+                    <span 
+                      class="text-[10px] px-2 py-0.5 rounded-full border flex items-center gap-1"
+                      :class="item.source === 'spotify' ? 'bg-emerald-950/60 text-emerald-400 border-emerald-800/80' : 'bg-slate-800 text-slate-400 border-slate-700'"
+                    >
+                      <i v-if="item.source === 'spotify'" class="fa-brands fa-spotify text-emerald-400"></i>
+                      <span>{{{{ item.source === 'spotify' ? 'Spotify' : 'YouTube Music' }}}}</span>
+                    </span>
+                    <a v-if="item.url" :href="item.url" target="_blank" class="text-xs text-slate-500 hover:text-emerald-400 transition" title="在网页中打开">
+                      <i class="fa-solid fa-arrow-up-right-from-square"></i>
+                    </a>
+                  </div>
+                </div>
+              </div>
+              <div class="mt-4 pt-3 border-t border-slate-700/50 flex items-center justify-end">
+                <button 
+                  @click="subscribeEntity(item, 'full')"
+                  :disabled="subscribingMap[item.id || item.url]"
+                  class="px-4 py-1.5 rounded-lg text-xs font-medium transition flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-500 text-white"
+                >
+                  <i v-if="subscribingMap[item.id || item.url]" class="fa-solid fa-spinner fa-spin"></i>
+                  <i v-else class="fa-solid fa-cloud-arrow-down"></i>
+                  <span>一键下载专辑</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 3. 单曲 分栏 -->
+        <div v-if="(searchCategory === 'all' || searchCategory === 'tracks') && searchResults.tracks?.length > 0" class="space-y-3">
+          <div class="flex items-center justify-between">
+            <h2 class="text-base font-semibold text-white flex items-center gap-2">
+              <i class="fa-solid fa-music text-emerald-400"></i>
+              <span>单曲 ({{{{ searchResults.tracks.length }}}})</span>
+            </h2>
+            <span class="text-xs text-slate-400">点击“一键下载”将自动匹配最佳音源、内嵌元数据与歌词并归档</span>
+          </div>
+          <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            <div 
+              v-for="(item, idx) in searchResults.tracks" 
+              :key="item.id || idx"
+              class="glass-card rounded-2xl p-4 flex flex-col justify-between"
+            >
+              <div class="flex gap-4">
+                <div class="w-20 h-20 rounded-xl overflow-hidden bg-slate-800 flex-shrink-0 relative">
+                  <img v-if="item.cover_url" :src="item.cover_url" :alt="item.title" class="w-full h-full object-cover">
+                  <div v-else class="w-full h-full flex items-center justify-center text-slate-600 text-2xl">
+                    <i class="fa-solid fa-music"></i>
+                  </div>
+                  <span v-if="item.duration_str" class="absolute bottom-1 right-1 px-1.5 py-0.5 rounded bg-black/70 text-[10px] text-white">
+                    {{{{ item.duration_str }}}}
+                  </span>
+                </div>
+                <div class="flex-1 min-w-0">
+                  <h3 class="font-bold text-white text-base truncate" :title="item.title">{{{{ item.title }}}}</h3>
+                  <p class="text-xs text-emerald-400 truncate mt-0.5" :title="item.artist">
+                    <i class="fa-solid fa-user-pen mr-1 opacity-70"></i>{{{{ item.artist }}}}
+                  </p>
+                  <p v-if="item.album" class="text-xs text-slate-400 truncate mt-0.5" :title="item.album">
+                    <i class="fa-solid fa-compact-disc mr-1 opacity-70"></i>{{{{ item.album }}}}
+                  </p>
+                  <div class="mt-2 flex items-center gap-2">
+                    <span 
+                      class="text-[10px] px-2 py-0.5 rounded-full border flex items-center gap-1"
+                      :class="item.source === 'spotify' ? 'bg-emerald-950/60 text-emerald-400 border-emerald-800/80' : 'bg-slate-800 text-slate-400 border-slate-700'"
+                    >
+                      <i v-if="item.source === 'spotify'" class="fa-brands fa-spotify text-emerald-400"></i>
+                      <i v-else-if="item.source === 'ytmusic'" class="fa-brands fa-youtube text-red-400"></i>
+                      <span>{{{{ item.source === 'spotify' ? 'Spotify' : (item.source === 'ytmusic' ? 'YouTube Music' : 'YouTube') }}}}</span>
+                    </span>
+                    <a v-if="item.url" :href="item.url" target="_blank" class="text-xs text-slate-500 hover:text-emerald-400 transition" title="在网页中打开">
+                      <i class="fa-solid fa-arrow-up-right-from-square"></i>
+                    </a>
+                  </div>
+                </div>
+              </div>
+              <div class="mt-4 pt-3 border-t border-slate-700/50 flex items-center justify-end">
+                <button 
+                  @click="downloadTrack(item)"
+                  :disabled="downloadingMap[item.id]"
+                  class="px-4 py-1.5 rounded-lg text-xs font-medium transition flex items-center gap-1.5"
+                  :class="downloadedMap[item.id] ? 'bg-emerald-950/60 text-emerald-400 border border-emerald-800' : 'bg-emerald-600 hover:bg-emerald-500 text-white'"
+                >
+                  <i v-if="downloadingMap[item.id]" class="fa-solid fa-spinner fa-spin"></i>
+                  <i v-else-if="downloadedMap[item.id]" class="fa-solid fa-check"></i>
+                  <i v-else class="fa-solid fa-download"></i>
+                  <span>{{{{ downloadingMap[item.id] ? '提交中...' : (downloadedMap[item.id] ? '已加入队列' : '一键下载') }}}}</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 4. 歌单 分栏 -->
+        <div v-if="(searchCategory === 'all' || searchCategory === 'playlists') && searchResults.playlists?.length > 0" class="space-y-3">
+          <div class="flex items-center justify-between">
+            <h2 class="text-base font-semibold text-white flex items-center gap-2">
+              <i class="fa-solid fa-list-music text-emerald-400"></i>
+              <span>歌单 ({{{{ searchResults.playlists.length }}}})</span>
+            </h2>
+            <span class="text-xs text-slate-400">支持一键订阅歌单，自动同步最新曲目</span>
+          </div>
+          <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            <div 
+              v-for="item in searchResults.playlists" 
+              :key="item.id || item.url"
+              class="glass-card rounded-2xl p-4 flex flex-col justify-between"
+            >
+              <div class="flex gap-4">
+                <div class="w-20 h-20 rounded-xl overflow-hidden bg-slate-800 flex-shrink-0 relative">
+                  <img v-if="item.cover_url" :src="item.cover_url" :alt="item.name" class="w-full h-full object-cover">
+                  <div v-else class="w-full h-full flex items-center justify-center text-slate-600 text-2xl">
+                    <i class="fa-solid fa-list-music"></i>
+                  </div>
+                </div>
+                <div class="flex-1 min-w-0">
+                  <h3 class="font-bold text-white text-base truncate" :title="item.name">{{{{ item.name }}}}</h3>
+                  <p v-if="item.owner" class="text-xs text-slate-400 truncate mt-0.5" :title="item.owner">
+                    <i class="fa-solid fa-user-circle mr-1 opacity-70"></i>创建者: {{{{ item.owner }}}}
+                  </p>
+                  <div class="mt-2 flex items-center gap-2">
+                    <span 
+                      class="text-[10px] px-2 py-0.5 rounded-full border flex items-center gap-1"
+                      :class="item.source === 'spotify' ? 'bg-emerald-950/60 text-emerald-400 border-emerald-800/80' : 'bg-slate-800 text-slate-400 border-slate-700'"
+                    >
+                      <i v-if="item.source === 'spotify'" class="fa-brands fa-spotify text-emerald-400"></i>
+                      <span>{{{{ item.source === 'spotify' ? 'Spotify' : 'YouTube Music' }}}}</span>
+                    </span>
+                    <a v-if="item.url" :href="item.url" target="_blank" class="text-xs text-slate-500 hover:text-emerald-400 transition" title="在网页中打开">
+                      <i class="fa-solid fa-arrow-up-right-from-square"></i>
+                    </a>
+                  </div>
+                </div>
+              </div>
+              <div class="mt-4 pt-3 border-t border-slate-700/50 flex items-center justify-end">
+                <button 
+                  @click="subscribeEntity(item, 'full')"
+                  :disabled="subscribingMap[item.id || item.url]"
+                  class="px-4 py-1.5 rounded-lg text-xs font-medium transition flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-500 text-white"
+                >
+                  <i v-if="subscribingMap[item.id || item.url]" class="fa-solid fa-spinner fa-spin"></i>
+                  <i v-else class="fa-solid fa-rss"></i>
+                  <span>一键订阅歌单</span>
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -261,7 +488,7 @@ def render_music_workbench_html(
       <!-- 空状态 -->
       <div v-else-if="searched && !searching" class="glass rounded-2xl p-12 text-center">
         <i class="fa-solid fa-music-slash text-4xl text-slate-600 mb-3"></i>
-        <p class="text-slate-400 text-sm">未找到与 "{{{{ searchQuery }}}}" 相关的歌曲，请尝试更换关键词。</p>
+        <p class="text-slate-400 text-sm">未找到与 "{{{{ searchQuery }}}}" 相关的歌曲、专辑或艺术家，请尝试更换关键词。</p>
       </div>
     </main>
 
@@ -761,9 +988,16 @@ def render_music_workbench_html(
         const searchQuery = ref('');
         const searching = ref(false);
         const searched = ref(false);
-        const searchResults = ref([]);
+        const searchResults = ref({{ tracks: [], albums: [], artists: [], playlists: [] }});
+        const searchCategory = ref('all');
         const downloadingMap = ref({{}});
         const downloadedMap = ref({{}});
+        const subscribingMap = ref({{}});
+
+        const totalResultsCount = computed(() => {{
+          const r = searchResults.value || {{}};
+          return (r.tracks?.length || 0) + (r.albums?.length || 0) + (r.artists?.length || 0) + (r.playlists?.length || 0);
+        }});
 
         const handleSearch = async () => {{
           if (!searchQuery.value.trim()) return;
@@ -771,14 +1005,44 @@ def render_music_workbench_html(
           searched.value = true;
           try {{
             const res = await request(`/search/query?query=${{encodeURIComponent(searchQuery.value)}}`);
-            searchResults.value = (res && res.data) ? res.data : [];
-            if (searchResults.value.length === 0) {{
-              showToast('未找到匹配歌曲，请尝试更简洁的歌手+歌名', 'error');
+            const d = (res && res.data) ? res.data : {{}};
+            if (Array.isArray(d)) {{
+              searchResults.value = {{ tracks: d, albums: [], artists: [], playlists: [] }};
+            }} else {{
+              searchResults.value = {{
+                tracks: d.tracks || [],
+                albums: d.albums || [],
+                artists: d.artists || [],
+                playlists: d.playlists || [],
+              }};
+            }}
+            if (totalResultsCount.value === 0) {{
+              showToast('未找到匹配内容，请尝试更换关键词', 'error');
             }}
           }} catch (e) {{
             showToast('搜索失败：' + (e.message || e), 'error');
           }} finally {{
             searching.value = false;
+          }}
+        }};
+
+        const subscribeEntity = async (item, mode = 'full') => {{
+          const key = item.id || item.url;
+          subscribingMap.value[key] = true;
+          try {{
+            await request('/subscriptions/add', {{
+              method: 'POST',
+              body: JSON.stringify({{
+                url: item.url,
+                sync_mode: mode,
+              }})
+            }});
+            showToast(`已成功添加《${{item.title || item.name}}》订阅！`);
+            fetchSubscriptions();
+          }} catch (e) {{
+            showToast('添加订阅失败: ' + (e.message || e), 'error');
+          }} finally {{
+            subscribingMap.value[key] = false;
           }}
         }};
 

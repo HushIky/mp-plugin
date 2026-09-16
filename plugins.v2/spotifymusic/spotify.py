@@ -1222,18 +1222,17 @@ def get_spotify_access_token(
         return None
 
 
-def search_spotify_tracks_keyless(
+def search_spotify_all_keyless(
     query: str,
     limit: int = 15,
     proxy: Optional[str] = None,
-) -> List[Dict[str, Any]]:
+) -> Dict[str, List[Dict[str, Any]]]:
     """
-    通过 Spotify Partner GraphQL API (searchSuggestions) 免 Key 搜索曲目。
-    无需配置 Client ID 与 Secret，直接使用公开匿名访问 Token。
+    通过 Spotify Partner GraphQL API (searchSuggestions) 免 Key 搜索曲目、专辑、艺术家与歌单。
     """
     token = get_anonymous_spotify_token(proxy=proxy)
     if not token:
-        return []
+        return {"tracks": [], "albums": [], "artists": [], "playlists": []}
 
     proxies = {"http": proxy, "https": proxy} if proxy else None
     headers = {
@@ -1263,68 +1262,149 @@ def search_spotify_tracks_keyless(
         resp.raise_for_status()
         data = resp.json()
         items = data.get("data", {}).get("searchV2", {}).get("topResultsV2", {}).get("itemsV2", [])
-        results: List[Dict[str, Any]] = []
+
+        tracks: List[Dict[str, Any]] = []
+        albums: List[Dict[str, Any]] = []
+        artists: List[Dict[str, Any]] = []
+        playlists: List[Dict[str, Any]] = []
+
         for item_wrapper in items:
             if not isinstance(item_wrapper, dict):
                 continue
             item = item_wrapper.get("item") or {}
-            if item.get("__typename") != "TrackResponseWrapper":
-                continue
+            typename = item.get("__typename")
             t_data = item.get("data") or {}
-            t_id = t_data.get("id")
-            t_name = t_data.get("name")
-            if not t_id or not t_name:
-                continue
 
-            artists_list = [
-                a.get("profile", {}).get("name", "")
-                for a in (t_data.get("artists", {}).get("items") or [])
-                if isinstance(a, dict) and a.get("profile", {}).get("name")
-            ]
-            artist_str = ", ".join(artists_list) if artists_list else "未知艺术家"
+            if typename == "TrackResponseWrapper":
+                t_id = t_data.get("id")
+                t_name = t_data.get("name")
+                if not t_id or not t_name:
+                    continue
 
-            album_data = t_data.get("albumOfTrack") or {}
-            album_name = album_data.get("name") or ""
-            album_artist_str = artist_str
+                artists_list = [
+                    a.get("profile", {}).get("name", "")
+                    for a in (t_data.get("artists", {}).get("items") or [])
+                    if isinstance(a, dict) and a.get("profile", {}).get("name")
+                ]
+                artist_str = ", ".join(artists_list) if artists_list else "未知艺术家"
 
-            cover_sources = album_data.get("coverArt", {}).get("sources") or []
-            cover_url = cover_sources[0].get("url") if cover_sources else ""
+                album_data = t_data.get("albumOfTrack") or {}
+                album_name = album_data.get("name") or ""
+                album_artist_str = artist_str
 
-            dur_ms = t_data.get("duration", {}).get("totalMilliseconds") or 0
-            dur_sec = dur_ms // 1000
-            m, s = divmod(dur_sec, 60)
-            dur_str = f"{m:02d}:{s:02d}"
+                cover_sources = album_data.get("coverArt", {}).get("sources") or []
+                cover_url = cover_sources[0].get("url") if cover_sources else ""
 
-            results.append({
-                "id": t_id,
-                "spotify_id": t_id,
-                "title": t_name,
-                "artist": artist_str,
-                "album": album_name,
-                "album_artist": album_artist_str,
-                "duration": dur_sec,
-                "duration_str": dur_str,
-                "cover_url": cover_url,
-                "source": "spotify",
-                "url": f"https://open.spotify.com/track/{t_id}",
-            })
-            if len(results) >= limit:
-                break
-        return results
+                dur_ms = t_data.get("duration", {}).get("totalMilliseconds") or 0
+                dur_sec = dur_ms // 1000
+                m, s = divmod(dur_sec, 60)
+                dur_str = f"{m:02d}:{s:02d}"
+
+                tracks.append({
+                    "id": t_id,
+                    "spotify_id": t_id,
+                    "title": t_name,
+                    "artist": artist_str,
+                    "album": album_name,
+                    "album_artist": album_artist_str,
+                    "duration": dur_sec,
+                    "duration_str": dur_str,
+                    "cover_url": cover_url,
+                    "source": "spotify",
+                    "url": f"https://open.spotify.com/track/{t_id}",
+                })
+
+            elif typename == "AlbumResponseWrapper":
+                uri = t_data.get("uri") or ""
+                alb_id = uri.split(":")[-1] if uri else ""
+                alb_name = t_data.get("name") or ""
+                if not alb_id or not alb_name:
+                    continue
+                artists_list = [
+                    a.get("profile", {}).get("name", "")
+                    for a in (t_data.get("artists", {}).get("items") or [])
+                    if isinstance(a, dict) and a.get("profile", {}).get("name")
+                ]
+                artist_str = ", ".join(artists_list) if artists_list else "未知艺术家"
+                cover_sources = t_data.get("coverArt", {}).get("sources") or []
+                cover_url = cover_sources[0].get("url") if cover_sources else ""
+                year = t_data.get("date", {}).get("year") or ""
+
+                albums.append({
+                    "id": alb_id,
+                    "spotify_id": alb_id,
+                    "title": alb_name,
+                    "artist": artist_str,
+                    "year": str(year) if year else "",
+                    "cover_url": cover_url,
+                    "source": "spotify",
+                    "url": f"https://open.spotify.com/album/{alb_id}",
+                })
+
+            elif typename == "ArtistResponseWrapper":
+                uri = t_data.get("uri") or ""
+                art_id = uri.split(":")[-1] if uri else ""
+                art_name = t_data.get("profile", {}).get("name") or ""
+                if not art_id or not art_name:
+                    continue
+                avatar_sources = t_data.get("visuals", {}).get("avatarImage", {}).get("sources") or []
+                avatar_url = avatar_sources[0].get("url") if avatar_sources else ""
+                verified = bool(
+                    t_data.get("onPlatformReputationTrait", {})
+                    .get("verification", {})
+                    .get("isVerified")
+                )
+                artists.append({
+                    "id": art_id,
+                    "spotify_id": art_id,
+                    "name": art_name,
+                    "avatar_url": avatar_url,
+                    "verified": verified,
+                    "source": "spotify",
+                    "url": f"https://open.spotify.com/artist/{art_id}",
+                })
+
+            elif typename == "PlaylistResponseWrapper":
+                uri = t_data.get("uri") or ""
+                pl_id = uri.split(":")[-1] if uri else ""
+                pl_name = t_data.get("name") or ""
+                if not pl_id or not pl_name:
+                    continue
+                owner_name = t_data.get("ownerV2", {}).get("data", {}).get("name") or ""
+                cover_items = t_data.get("images", {}).get("items") or []
+                cover_sources = cover_items[0].get("sources") if cover_items else []
+                cover_url = cover_sources[0].get("url") if cover_sources else ""
+                playlists.append({
+                    "id": pl_id,
+                    "spotify_id": pl_id,
+                    "name": pl_name,
+                    "owner": owner_name,
+                    "cover_url": cover_url,
+                    "source": "spotify",
+                    "url": f"https://open.spotify.com/playlist/{pl_id}",
+                })
+
+        return {
+            "tracks": tracks[:limit],
+            "albums": albums[:limit],
+            "artists": artists[:limit],
+            "playlists": playlists[:limit],
+        }
     except Exception as e:
-        logger.warning(f"Spotify Partner GraphQL 免 Key 搜索异常: {e}")
-        return []
+        logger.warning(f"Spotify Partner GraphQL 免 Key 多分类搜索异常: {e}")
+        return {"tracks": [], "albums": [], "artists": [], "playlists": []}
 
 
-def search_spotify_tracks(
+def search_spotify_all(
     query: str,
     client_id: Optional[str] = None,
     client_secret: Optional[str] = None,
     limit: int = 15,
     proxy: Optional[str] = None,
-) -> List[Dict[str, Any]]:
+) -> Dict[str, List[Dict[str, Any]]]:
     """
-    搜索 Spotify 曲目。优先使用官方 Web API（若配置凭据），否则无缝回退到 GraphQL 免 Key 搜索。
+    搜索 Spotify 全分类（单曲、专辑、艺术家、歌单）。
+    优先使用官方 Web API（若配置凭据），否则无缝回退到 GraphQL 免 Key 搜索。
     """
     if client_id and client_secret:
         token = get_spotify_access_token(client_id, client_secret, proxy=proxy)
@@ -1338,15 +1418,16 @@ def search_spotify_tracks(
                         "Authorization": f"Bearer {token}",
                         "User-Agent": _USER_AGENT,
                     },
-                    params={"q": query, "type": "track", "limit": limit},
+                    params={"q": query, "type": "track,album,artist,playlist", "limit": limit},
                     proxies=proxies,
                     timeout=10,
                 )
                 resp.raise_for_status()
                 data = resp.json()
-                items = data.get("tracks", {}).get("items") or []
-                results = []
-                for item in items:
+
+                # Tracks
+                tracks = []
+                for item in (data.get("tracks", {}).get("items") or []):
                     artists_list = [
                         a.get("name", "")
                         for a in (item.get("artists") or [])
@@ -1354,39 +1435,116 @@ def search_spotify_tracks(
                     ]
                     artist_str = ", ".join(artists_list) if artists_list else "未知艺术家"
                     album_info = item.get("album") or {}
-                    album_artists_list = [
-                        a.get("name", "")
-                        for a in (album_info.get("artists") or [])
-                        if isinstance(a, dict) and a.get("name")
-                    ]
-                    album_artist_str = (
-                        ", ".join(album_artists_list) if album_artists_list else artist_str
-                    )
-                    album_images = album_info.get("images") or []
-                    cover_url = album_images[0].get("url") if album_images else ""
+                    cover_url = (album_info.get("images") or [{}])[0].get("url") or ""
                     dur_ms = item.get("duration_ms") or 0
                     dur_sec = dur_ms // 1000
                     m, s = divmod(dur_sec, 60)
-                    dur_str = f"{m:02d}:{s:02d}"
-
-                    results.append({
+                    tracks.append({
                         "id": item.get("id"),
                         "spotify_id": item.get("id"),
                         "title": item.get("name"),
                         "artist": artist_str,
                         "album": album_info.get("name") or "",
-                        "album_artist": album_artist_str,
+                        "album_artist": artist_str,
                         "duration": dur_sec,
-                        "duration_str": dur_str,
+                        "duration_str": f"{m:02d}:{s:02d}",
                         "cover_url": cover_url,
                         "source": "spotify",
                         "url": f"https://open.spotify.com/track/{item.get('id')}",
                     })
-                if results:
-                    return results
+
+                # Albums
+                albums = []
+                for item in (data.get("albums", {}).get("items") or []):
+                    artists_list = [
+                        a.get("name", "")
+                        for a in (item.get("artists") or [])
+                        if isinstance(a, dict) and a.get("name")
+                    ]
+                    artist_str = ", ".join(artists_list) if artists_list else "未知艺术家"
+                    cover_url = (item.get("images") or [{}])[0].get("url") or ""
+                    release_date = item.get("release_date") or ""
+                    year = release_date.split("-")[0] if release_date else ""
+                    albums.append({
+                        "id": item.get("id"),
+                        "spotify_id": item.get("id"),
+                        "title": item.get("name"),
+                        "artist": artist_str,
+                        "year": year,
+                        "cover_url": cover_url,
+                        "source": "spotify",
+                        "url": f"https://open.spotify.com/album/{item.get('id')}",
+                    })
+
+                # Artists
+                artists = []
+                for item in (data.get("artists", {}).get("items") or []):
+                    cover_url = (item.get("images") or [{}])[0].get("url") or ""
+                    artists.append({
+                        "id": item.get("id"),
+                        "spotify_id": item.get("id"),
+                        "name": item.get("name"),
+                        "avatar_url": cover_url,
+                        "verified": True,
+                        "source": "spotify",
+                        "url": f"https://open.spotify.com/artist/{item.get('id')}",
+                    })
+
+                # Playlists
+                playlists = []
+                for item in (data.get("playlists", {}).get("items") or []):
+                    if not item:
+                        continue
+                    cover_url = (item.get("images") or [{}])[0].get("url") or ""
+                    owner_name = (item.get("owner") or {}).get("display_name") or ""
+                    playlists.append({
+                        "id": item.get("id"),
+                        "spotify_id": item.get("id"),
+                        "name": item.get("name"),
+                        "owner": owner_name,
+                        "cover_url": cover_url,
+                        "source": "spotify",
+                        "url": f"https://open.spotify.com/playlist/{item.get('id')}",
+                    })
+
+                if tracks or albums or artists or playlists:
+                    return {
+                        "tracks": tracks,
+                        "albums": albums,
+                        "artists": artists,
+                        "playlists": playlists,
+                    }
             except Exception as e:
-                logger.warning(f"Spotify 官方搜索异常，自动尝试免 Key 搜索: {e}")
+                logger.warning(f"Spotify 官方全分类搜索异常，自动尝试免 Key 搜索: {e}")
 
     # 免 Key 搜索回退
-    return search_spotify_tracks_keyless(query=query, limit=limit, proxy=proxy)
+    return search_spotify_all_keyless(query=query, limit=limit, proxy=proxy)
+
+
+def search_spotify_tracks_keyless(
+    query: str,
+    limit: int = 15,
+    proxy: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """通过 Spotify Partner GraphQL API 免 Key 搜索单曲列表。"""
+    res = search_spotify_all_keyless(query=query, limit=limit, proxy=proxy)
+    return res.get("tracks") or []
+
+
+def search_spotify_tracks(
+    query: str,
+    client_id: Optional[str] = None,
+    client_secret: Optional[str] = None,
+    limit: int = 15,
+    proxy: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """搜索 Spotify 单曲列表（优先官方 API，回退至 GraphQL 免 Key）。"""
+    res = search_spotify_all(
+        query=query,
+        client_id=client_id,
+        client_secret=client_secret,
+        limit=limit,
+        proxy=proxy,
+    )
+    return res.get("tracks") or []
 

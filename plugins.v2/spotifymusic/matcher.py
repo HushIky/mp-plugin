@@ -173,44 +173,49 @@ def match_youtube_track(
     return None
 
 
-def search_music_candidates(
+def search_music_all(
     query: str,
     limit: int = 15,
     proxy: Optional[str] = None,
     spotify_client_id: Optional[str] = None,
     spotify_client_secret: Optional[str] = None,
-) -> List[Dict[str, Any]]:
+) -> Dict[str, List[Dict[str, Any]]]:
     """
-    搜索音乐候选列表。
-    优先通过 Spotify 搜索（支持官方 API 或免 Key GraphQL 搜索，提供最全的专辑/封面/艺术家信息），
-    若失败或无结果则无缝回退到 YouTube Music API 或 yt-dlp。
+    全分类搜索音乐（单曲、专辑、艺术家、歌单）。
+    优先通过 Spotify 搜索（支持免 Key GraphQL 或官方 API），
+    若无结果或异常则自动回退至 YouTube Music API 与 yt-dlp。
     """
     query = (query or "").strip()
     if not query:
-        return []
+        return {"tracks": [], "albums": [], "artists": [], "playlists": []}
 
-    # 1. 优先使用 Spotify 搜索（免 Key 或官方凭据均支持）
+    # 1. 优先使用 Spotify 全分类搜索（免 Key 或官方凭据均支持）
     try:
         from . import spotify
-        sp_results = spotify.search_spotify_tracks(
+        sp_results = spotify.search_spotify_all(
             query=query,
             client_id=spotify_client_id,
             client_secret=spotify_client_secret,
             limit=limit,
             proxy=proxy,
         )
-        if sp_results:
+        if any(sp_results.get(k) for k in ("tracks", "albums", "artists", "playlists")):
             return sp_results
     except Exception as e:
-        logger.debug(f"Spotify 搜索候选跳过: {e}")
+        logger.debug(f"Spotify 全分类搜索跳过: {e}")
 
-    # 2. 默认零配置回退：YouTube Music 官方搜索
-    candidates: List[Dict[str, Any]] = []
+    # 2. 默认零配置回退：YouTube Music 全分类搜索
+    tracks: List[Dict[str, Any]] = []
+    albums: List[Dict[str, Any]] = []
+    artists: List[Dict[str, Any]] = []
+    playlists: List[Dict[str, Any]] = []
+
     ytm = get_ytm_client()
     if ytm:
         try:
-            results = ytm.search(query, filter="songs", limit=limit)
-            for r in results:
+            # 搜索单曲
+            song_res = ytm.search(query, filter="songs", limit=limit)
+            for r in song_res:
                 vid = r.get("videoId")
                 if not vid:
                     continue
@@ -223,81 +228,146 @@ def search_music_candidates(
                 artist = ", ".join(artists_list) if artists_list else "未知艺术家"
                 album_info = r.get("album")
                 album_name = album_info.get("name") if isinstance(album_info, dict) else ""
-
                 thumbnails = r.get("thumbnails") or []
                 cover_url = thumbnails[-1].get("url") if thumbnails else ""
+                dur_sec = r.get("duration_seconds") or 0
+                dur_str = r.get("duration") or ""
+                if not dur_str and dur_sec:
+                    m, s = divmod(int(dur_sec), 60)
+                    dur_str = f"{m:02d}:{s:02d}"
 
-                duration_sec = r.get("duration_seconds") or 0
-                duration_str = r.get("duration") or ""
-                if not duration_str and duration_sec:
-                    m, s = divmod(int(duration_sec), 60)
-                    duration_str = f"{m:02d}:{s:02d}"
-
-                candidates.append({
+                tracks.append({
                     "id": vid,
                     "title": title,
                     "artist": artist,
                     "album": album_name or "",
                     "album_artist": artist,
-                    "duration": duration_sec,
-                    "duration_str": duration_str,
+                    "duration": dur_sec,
+                    "duration_str": dur_str,
                     "cover_url": cover_url,
                     "source": "ytmusic",
                     "url": f"https://music.youtube.com/watch?v={vid}",
                 })
-            if candidates:
-                return candidates
-        except Exception as e:
-            logger.debug(f"YTMusic 搜索候选异常: {e}")
 
-    # 3. 回退 yt-dlp 搜索
-    if not _HAS_YTDLP:
-        return candidates
-
-    ydl_opts = {
-        "quiet": True,
-        "no_warnings": True,
-        "extract_flat": "in_playlist",
-        "skip_download": True,
-        "noplaylist": True,
-    }
-    if proxy:
-        ydl_opts["proxy"] = proxy
-
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            search_query = f"ytsearch{limit}:{query}"
-            info = ydl.extract_info(search_query, download=False)
-            entries = (info or {}).get("entries") or []
-            for entry in entries:
-                if not entry:
-                    continue
-                vid = entry.get("id")
-                if not vid:
-                    continue
-                title = entry.get("title", "")
-                uploader = entry.get("uploader") or entry.get("channel") or "未知艺术家"
-                dur = int(entry.get("duration") or 0)
-                m, s = divmod(dur, 60)
-                dur_str = f"{m:02d}:{s:02d}" if dur else ""
-                thumbnails = entry.get("thumbnails") or []
-                cover = thumbnails[-1].get("url") if thumbnails else (entry.get("thumbnail") or "")
-
-                candidates.append({
-                    "id": vid,
-                    "title": title,
-                    "artist": uploader,
-                    "album": "",
-                    "album_artist": uploader,
-                    "duration": dur,
-                    "duration_str": dur_str,
-                    "cover_url": cover,
-                    "source": "youtube",
-                    "url": f"https://www.youtube.com/watch?v={vid}",
+            # 搜索专辑
+            album_res = ytm.search(query, filter="albums", limit=min(limit, 8))
+            for a in album_res:
+                browse_id = a.get("browseId") or ""
+                alb_title = a.get("title") or ""
+                artists_list = [
+                    ar.get("name", "")
+                    for ar in (a.get("artists") or [])
+                    if isinstance(ar, dict) and ar.get("name")
+                ]
+                alb_artist = ", ".join(artists_list) if artists_list else "未知艺术家"
+                thumbnails = a.get("thumbnails") or []
+                cover_url = thumbnails[-1].get("url") if thumbnails else ""
+                year = a.get("year") or ""
+                albums.append({
+                    "id": browse_id,
+                    "title": alb_title,
+                    "artist": alb_artist,
+                    "year": str(year),
+                    "cover_url": cover_url,
+                    "source": "ytmusic",
+                    "url": f"https://music.youtube.com/browse/{browse_id}" if browse_id else "",
                 })
-    except Exception as e:
-        logger.warning(f"yt-dlp 搜索候选失败: {e}")
 
-    return candidates
+            # 搜索艺术家
+            artist_res = ytm.search(query, filter="artists", limit=min(limit, 6))
+            for ar in artist_res:
+                browse_id = ar.get("browseId") or ""
+                art_name = ar.get("artist") or ar.get("title") or ""
+                thumbnails = ar.get("thumbnails") or []
+                cover_url = thumbnails[-1].get("url") if thumbnails else ""
+                artists.append({
+                    "id": browse_id,
+                    "name": art_name,
+                    "avatar_url": cover_url,
+                    "verified": False,
+                    "source": "ytmusic",
+                    "url": f"https://music.youtube.com/browse/{browse_id}" if browse_id else "",
+                })
+
+            if tracks or albums or artists:
+                return {
+                    "tracks": tracks,
+                    "albums": albums,
+                    "artists": artists,
+                    "playlists": playlists,
+                }
+        except Exception as e:
+            logger.debug(f"YTMusic 全分类检索异常: {e}")
+
+    # 3. 回退 yt-dlp 搜索单曲
+    if _HAS_YTDLP:
+        ydl_opts = {
+            "quiet": True,
+            "no_warnings": True,
+            "extract_flat": "in_playlist",
+            "skip_download": True,
+            "noplaylist": True,
+        }
+        if proxy:
+            ydl_opts["proxy"] = proxy
+
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                search_query = f"ytsearch{limit}:{query}"
+                info = ydl.extract_info(search_query, download=False)
+                entries = (info or {}).get("entries") or []
+                for entry in entries:
+                    if not entry:
+                        continue
+                    vid = entry.get("id")
+                    if not vid:
+                        continue
+                    title = entry.get("title", "")
+                    uploader = entry.get("uploader") or entry.get("channel") or "未知艺术家"
+                    dur = int(entry.get("duration") or 0)
+                    m, s = divmod(dur, 60)
+                    dur_str = f"{m:02d}:{s:02d}" if dur else ""
+                    thumbnails = entry.get("thumbnails") or []
+                    cover = thumbnails[-1].get("url") if thumbnails else (entry.get("thumbnail") or "")
+
+                    tracks.append({
+                        "id": vid,
+                        "title": title,
+                        "artist": uploader,
+                        "album": "",
+                        "album_artist": uploader,
+                        "duration": dur,
+                        "duration_str": dur_str,
+                        "cover_url": cover,
+                        "source": "youtube",
+                        "url": f"https://www.youtube.com/watch?v={vid}",
+                    })
+        except Exception as e:
+            logger.warning(f"yt-dlp 搜索候选失败: {e}")
+
+    return {
+        "tracks": tracks,
+        "albums": albums,
+        "artists": artists,
+        "playlists": playlists,
+    }
+
+
+def search_music_candidates(
+    query: str,
+    limit: int = 15,
+    proxy: Optional[str] = None,
+    spotify_client_id: Optional[str] = None,
+    spotify_client_secret: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """搜索音乐候选曲目列表（向后兼容接口）。"""
+    all_res = search_music_all(
+        query=query,
+        limit=limit,
+        proxy=proxy,
+        spotify_client_id=spotify_client_id,
+        spotify_client_secret=spotify_client_secret,
+    )
+    return all_res.get("tracks") or []
 
 

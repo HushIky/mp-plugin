@@ -37,7 +37,7 @@ class SpotifyMusic(_PluginBase):
     plugin_name = "Spotify音乐下载与订阅"
     plugin_desc = "支持 Spotify 链接解析、音乐搜索、歌单/艺术家增量订阅、元数据标签/封面/歌词内嵌与目录自动整理。"
     plugin_icon = "spotifymusic.png"
-    plugin_version = "1.1.5"
+    plugin_version = "1.1.6"
     plugin_label = "音乐管理"
     plugin_author = "local"
     plugin_order = 10
@@ -668,19 +668,34 @@ class SpotifyMusic(_PluginBase):
         )
 
     def api_search_query(self, query: str = "", limit: int = 15) -> Dict[str, Any]:
-        """搜索歌曲候选项列表（优先使用配置的 Spotify 官方 API，回退至 YouTube Music）。"""
+        """全分类搜索音乐候选项（单曲、专辑、艺术家、歌单）。"""
         try:
-            candidates = matcher.search_music_candidates(
+            candidates = matcher.search_music_all(
                 query=query,
                 limit=limit,
                 proxy=self._proxy or None,
                 spotify_client_id=self._spotify_client_id or None,
                 spotify_client_secret=self._spotify_client_secret or None,
             )
-            return {"code": 0, "msg": "ok", "data": candidates, "success": True}
+            if isinstance(candidates, list):
+                data = {
+                    "tracks": candidates,
+                    "albums": [],
+                    "artists": [],
+                    "playlists": [],
+                }
+            else:
+                data = candidates
+            return {"code": 0, "msg": "ok", "data": data, "success": True}
         except Exception as e:
-            logger.error(f"[{self.plugin_name}] 搜索歌曲异常: {e}")
-            return {"code": -1, "msg": str(e), "data": [], "success": False, "message": str(e)}
+            logger.error(f"[{self.plugin_name}] 搜索音乐异常: {e}")
+            return {
+                "code": -1,
+                "msg": str(e),
+                "data": {"tracks": [], "albums": [], "artists": [], "playlists": []},
+                "success": False,
+                "message": str(e),
+            }
 
     # ==================== API 路由处理逻辑 ====================
 
