@@ -26,7 +26,7 @@ class SpotifyMusic(_PluginBase):
     plugin_name = "Spotify音乐下载与订阅"
     plugin_desc = "支持 Spotify 链接解析、音乐搜索、歌单/艺术家增量订阅、元数据标签/封面/歌词内嵌与目录自动整理。"
     plugin_icon = "spotifymusic.png"
-    plugin_version = "1.0.2"
+    plugin_version = "1.0.3"
     plugin_label = "音乐管理"
     plugin_author = "local"
     plugin_order = 10
@@ -90,6 +90,27 @@ class SpotifyMusic(_PluginBase):
         if self._enabled:
             self._queue_mgr.start(num_workers=2)
 
+        # 检查是否在保存设置时提交了手动添加链接
+        add_url = str(config.get("add_spotify_url") or "").strip()
+        add_sync_mode = str(config.get("add_sync_mode") or "only_new").strip()
+        if add_url and self._enabled:
+            threading.Thread(
+                target=self._handle_manual_add_url,
+                args=(add_url, add_sync_mode),
+                daemon=True,
+                name="SpotifyMusicManualAdd",
+            ).start()
+
+        # 检查是否在保存设置时提交了歌曲搜索下载
+        search_kw = str(config.get("search_keyword") or "").strip()
+        if search_kw and self._enabled:
+            threading.Thread(
+                target=self._handle_manual_search_download,
+                args=(search_kw,),
+                daemon=True,
+                name="SpotifyMusicManualSearch",
+            ).start()
+
         logger.info(
             f"[{self.plugin_name}] 初始化完成：启用={self._enabled}，"
             f"目标目录={self._music_dir}，格式={self._audio_format}，巡检间隔={self._interval_minutes}分"
@@ -129,6 +150,42 @@ class SpotifyMusic(_PluginBase):
                     {
                         "component": "VTextField",
                         "props": {
+                            "model": "add_spotify_url",
+                            "label": "【快速添加】Spotify 链接订阅 / 即时下载",
+                            "placeholder": "例如: https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M",
+                            "hint": "支持 Spotify 单曲、专辑、歌单或艺术家链接，保存配置时立即自动解析并加入处理队列",
+                            "persistentHint": True,
+                        },
+                    },
+                    {
+                        "component": "VSelect",
+                        "props": {
+                            "model": "add_sync_mode",
+                            "label": "链接处理与订阅模式",
+                            "items": [
+                                {"title": "🌿 仅监控新增 (首次仅建立存量基准，后续自动下载新加入的曲目)", "value": "only_new"},
+                                {"title": "📦 全量订阅 (立即将已有全部歌曲排入下载，并持续监控新歌)", "value": "all"},
+                                {"title": "⚡ 单次批量下载 (仅下载当前所有歌曲，不加入长期订阅)", "value": "once"},
+                            ],
+                        },
+                    },
+                    {
+                        "component": "VTextField",
+                        "props": {
+                            "model": "search_keyword",
+                            "label": "【快捷搜索】单曲直接搜索下载",
+                            "placeholder": "例如输入: 周杰伦 晴天 或 Taylor Swift Cruel Summer",
+                            "hint": "输入歌手与歌名，保存配置时自动匹配 YouTube Music 最佳音源、下载并内嵌标签与歌词",
+                            "persistentHint": True,
+                        },
+                    },
+                    {
+                        "component": "VDivider",
+                        "props": {"class": "my-4"},
+                    },
+                    {
+                        "component": "VTextField",
+                        "props": {
                             "model": "music_dir",
                             "label": "音乐存储根目录",
                             "placeholder": "/media/music",
@@ -146,7 +203,7 @@ class SpotifyMusic(_PluginBase):
                                     {
                                         "component": "VSelect",
                                         "props": {
-                                             "model": "format",
+                                            "model": "format",
                                             "label": "音频输出格式",
                                             "items": [
                                                 {"title": "MP3", "value": "mp3"},
@@ -268,6 +325,9 @@ class SpotifyMusic(_PluginBase):
         ]
         default_config = {
             "enabled": False,
+            "add_spotify_url": "",
+            "add_sync_mode": "only_new",
+            "search_keyword": "",
             "music_dir": "/media/music",
             "format": "mp3",
             "bitrate": "320",
@@ -294,9 +354,10 @@ class SpotifyMusic(_PluginBase):
             ]
 
         subs = self._db.list_subscriptions()
-        tasks = self._db.list_tasks(limit=10)
+        tasks = self._db.list_tasks(limit=15)
         completed_tasks = [t for t in tasks if t.get("status") == "completed"]
         active_tasks = [t for t in tasks if t.get("status") in ("downloading", "processing", "pending")]
+        failed_tasks = [t for t in tasks if t.get("status") == "failed"]
 
         sub_list_text = []
         for s in subs:
@@ -306,7 +367,17 @@ class SpotifyMusic(_PluginBase):
                 f"• 【{s.get('type', '').upper()}】{s.get('name')} | 模式: {mode_text} | "
                 f"已下载: {s.get('downloaded_tracks', 0)} 首 | 上次检查: {last_chk}"
             )
-        subs_summary = "\n".join(sub_list_text) if sub_list_text else "暂无活跃订阅，可通过 API 或交互面板添加。"
+        subs_summary = "\n".join(sub_list_text) if sub_list_text else "暂无活跃订阅。直接在插件配置面板中输入 Spotify 链接即可添加！"
+
+        recent_task_text = []
+        for t in tasks[:8]:
+            st = t.get("status")
+            pct = t.get("progress", 0.0)
+            status_icon = "✅" if st == "completed" else ("❌" if st == "failed" else "⏳")
+            recent_task_text.append(
+                f"{status_icon} [{st.upper()}] {t.get('artist')} - {t.get('title')} ({pct:.0f}%)"
+            )
+        tasks_summary = "\n".join(recent_task_text) if recent_task_text else "暂无下载任务记录。"
 
         return [
             {
@@ -315,20 +386,24 @@ class SpotifyMusic(_PluginBase):
                 "content": [
                     {
                         "component": "VCardTitle",
-                        "text": "Spotify 音乐服务运行概况",
+                        "text": "🎵 Spotify 音乐服务运行概况",
                     },
                     {
                         "component": "VCardText",
                         "text": (
-                            f"当前已激活订阅数：{len(subs)} 个\n"
-                            f"正在处理中任务：{len(active_tasks)} 个\n"
-                            f"最近完成记录：{len(completed_tasks)} 条\n\n"
-                            f"已订阅的歌单与艺术家：\n{subs_summary}"
+                            f"【运行状态】已激活订阅: {len(subs)} 个 | 进行中任务: {len(active_tasks)} 个 | 已完成: {len(completed_tasks)} 条 | 失败: {len(failed_tasks)} 条\n\n"
+                            f"【💡 快速添加与搜索使用指引】\n"
+                            f"1. 点击当前插件的【设置】按钮；\n"
+                            f"2. 在【快速添加】栏粘贴 Spotify 单曲/专辑/歌单/艺术家链接，选择【仅监控新增】或【全量订阅】，点击保存即可！\n"
+                            f"3. 在【快捷搜索】栏输入 '歌手 歌名'（如 '周杰伦 晴天'），点击保存即可自动下载并归档！\n\n"
+                            f"【已订阅的歌单与艺术家】\n{subs_summary}\n\n"
+                            f"【最近任务动态】\n{tasks_summary}"
                         ),
                     },
                 ],
             }
         ]
+
 
     def get_api(self) -> List[Dict[str, Any]]:
         """注册插件 REST API 路由，供前端面板与外部调用。"""
@@ -645,10 +720,106 @@ class SpotifyMusic(_PluginBase):
                 text=f"曲目: {title}\n艺术家: {artist}\n专辑: {track_info.get('album', '')}\n路径: {final_path.name}",
             )
 
+    def _handle_manual_add_url(self, url: str, sync_mode: str) -> None:
+        """后台异步处理表单中提交的 Spotify 链接。"""
+        if not self._db or not self._queue_mgr:
+            return
+        logger.info(f"[{self.plugin_name}] 正在处理手动提交的 Spotify 链接: {url} (模式: {sync_mode})")
+        try:
+            entity = spotify.resolve_spotify_entity(url, self._proxy or None)
+            sub_type = entity.get("type", "playlist")
+            spotify_id = entity.get("spotify_id", "")
+            name = entity.get("name") or "未命名"
+            cover_url = entity.get("cover_url", "")
+            tracks = entity.get("tracks") or []
+
+            if sync_mode == "once" or sub_type == "track":
+                # 单次下载：直接排入下载队列，不计入定时巡检订阅
+                for t in tracks:
+                    self._queue_mgr.submit_track(t, playlist_name=name)
+                self.post_message(
+                    mtype=NotificationType.Plugin,
+                    title=f"🎵 Spotify 链接已解析 ({name})",
+                    text=f"类型: {sub_type}\n已将 {len(tracks)} 首曲目提交至下载队列，正在后台自动转码与内嵌元数据。",
+                )
+            elif sync_mode == "only_new":
+                # 长期增量订阅（仅监控新增）
+                sub_record = self._db.add_subscription(
+                    sub_type=sub_type,
+                    spotify_id=spotify_id,
+                    name=name,
+                    url=url,
+                    cover_url=cover_url,
+                    interval_minutes=self._interval_minutes,
+                    sync_mode="only_new",
+                )
+                sub_id = sub_record.get("id")
+                base_count = self._db.batch_record_existing_base(sub_id, tracks)
+                self._db.update_subscription_stats(sub_id, total_tracks=len(tracks))
+                self.post_message(
+                    mtype=NotificationType.Plugin,
+                    title=f"🎵 Spotify 订阅添加成功 ({name})",
+                    text=f"已成功添加长期订阅！已建立 {base_count} 首存量基准曲目，后续将自动监控并下载新增歌曲。",
+                )
+            else:
+                # 长期全量订阅
+                sub_record = self._db.add_subscription(
+                    sub_type=sub_type,
+                    spotify_id=spotify_id,
+                    name=name,
+                    url=url,
+                    cover_url=cover_url,
+                    interval_minutes=self._interval_minutes,
+                    sync_mode="all",
+                )
+                sub_id = sub_record.get("id")
+                enqueued = 0
+                for t in tracks:
+                    self._queue_mgr.submit_track(t, subscription_id=sub_id, playlist_name=name)
+                    enqueued += 1
+                self._db.update_subscription_stats(sub_id, total_tracks=len(tracks))
+                self.post_message(
+                    mtype=NotificationType.Plugin,
+                    title=f"🎵 Spotify 全量订阅添加成功 ({name})",
+                    text=f"已将 {enqueued} 首曲目推入下载队列，并将该歌单加入定期巡检订阅列表。",
+                )
+        except Exception as e:
+            logger.error(f"[{self.plugin_name}] 处理 Spotify 链接失败: {e}")
+            self.post_message(
+                mtype=NotificationType.Plugin,
+                title="❌ Spotify 链接解析失败",
+                text=f"链接: {url}\n错误原因: {e}",
+            )
+
+    def _handle_manual_search_download(self, keyword: str) -> None:
+        """后台异步处理手动搜索并下载。"""
+        if not self._queue_mgr:
+            return
+        logger.info(f"[{self.plugin_name}] 正在搜索并下载单曲: {keyword}")
+        try:
+            parts = keyword.split(maxsplit=1)
+            artist = parts[0] if len(parts) > 1 else ""
+            title = parts[1] if len(parts) > 1 else keyword
+            track_info = {
+                "title": title,
+                "artist": artist,
+                "album": "",
+                "cover_url": "",
+            }
+            task_id = self._queue_mgr.submit_track(track_info)
+            self.post_message(
+                mtype=NotificationType.Plugin,
+                title=f"🎵 已提交歌曲搜索下载: {keyword}",
+                text=f"已生成下载任务，正在匹配 YouTube Music 最优音源并下载打标。",
+            )
+        except Exception as e:
+            logger.error(f"[{self.plugin_name}] 搜索单曲失败: {e}")
+
     def stop_service(self) -> None:
         """停止插件后台队列与服务。"""
         if self._queue_mgr:
             self._queue_mgr.stop()
             self._queue_mgr = None
         self._db = None
+
 
