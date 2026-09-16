@@ -181,28 +181,28 @@ def search_music_candidates(
     spotify_client_secret: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """
-    搜索音乐候选列表，优先通过 Spotify 官方 API（如果配置了凭据），
-    否则通过 YouTube Music API 或 yt-dlp 进行免登录检索。
+    搜索音乐候选列表。
+    优先通过 Spotify 搜索（支持官方 API 或免 Key GraphQL 搜索，提供最全的专辑/封面/艺术家信息），
+    若失败或无结果则无缝回退到 YouTube Music API 或 yt-dlp。
     """
     query = (query or "").strip()
     if not query:
         return []
 
-    # 1. 若配置了 Spotify 开发者凭据，优先使用 Spotify 官方搜索
-    if spotify_client_id and spotify_client_secret:
-        try:
-            from . import spotify
-            sp_results = spotify.search_spotify_tracks(
-                query=query,
-                client_id=spotify_client_id,
-                client_secret=spotify_client_secret,
-                limit=limit,
-                proxy=proxy,
-            )
-            if sp_results:
-                return sp_results
-        except Exception as e:
-            logger.debug(f"Spotify 官方搜索跳过: {e}")
+    # 1. 优先使用 Spotify 搜索（免 Key 或官方凭据均支持）
+    try:
+        from . import spotify
+        sp_results = spotify.search_spotify_tracks(
+            query=query,
+            client_id=spotify_client_id,
+            client_secret=spotify_client_secret,
+            limit=limit,
+            proxy=proxy,
+        )
+        if sp_results:
+            return sp_results
+    except Exception as e:
+        logger.debug(f"Spotify 搜索候选跳过: {e}")
 
     # 2. 默认零配置回退：YouTube Music 官方搜索
     candidates: List[Dict[str, Any]] = []

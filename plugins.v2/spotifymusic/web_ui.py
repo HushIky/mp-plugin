@@ -228,8 +228,13 @@ def render_music_workbench_html(
                   <i class="fa-solid fa-compact-disc mr-1 opacity-70"></i>{{{{ item.album }}}}
                 </p>
                 <div class="mt-2 flex items-center gap-2">
-                  <span class="text-[10px] px-2 py-0.5 rounded-full bg-slate-800 text-slate-400 border border-slate-700">
-                    {{{{ item.source === 'ytmusic' ? 'YouTube Music' : 'YouTube' }}}}
+                  <span 
+                    class="text-[10px] px-2 py-0.5 rounded-full border flex items-center gap-1"
+                    :class="item.source === 'spotify' ? 'bg-emerald-950/60 text-emerald-400 border-emerald-800/80' : 'bg-slate-800 text-slate-400 border-slate-700'"
+                  >
+                    <i v-if="item.source === 'spotify'" class="fa-brands fa-spotify text-emerald-400"></i>
+                    <i v-else-if="item.source === 'ytmusic'" class="fa-brands fa-youtube text-red-400"></i>
+                    <span>{{{{ item.source === 'spotify' ? 'Spotify' : (item.source === 'ytmusic' ? 'YouTube Music' : 'YouTube') }}}}</span>
                   </span>
                 </div>
               </div>
