@@ -171,6 +171,71 @@ class SpotifyMusic(_PluginBase):
                                     {
                                         "component": "VTextField",
                                         "props": {
+                                            "model": "add_spotify_url",
+                                            "label": "【快捷添加】Spotify 链接订阅 / 即时下载",
+                                            "placeholder": "例如: https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M",
+                                        },
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [
+                                    {
+                                        "component": "VSelect",
+                                        "props": {
+                                            "model": "add_sync_mode",
+                                            "label": "Spotify 链接处理模式",
+                                            "items": [
+                                                {"title": "🌿 仅监控新增 (首次建立存量基准，后续仅下载新歌)", "value": "only_new"},
+                                                {"title": "📦 全量订阅 (立即将已有全部歌曲排入下载，并持续监控新歌)", "value": "all"},
+                                                {"title": "⚡ 单次批量下载 (仅下载当前所有歌曲，不加入长期订阅)", "value": "once"},
+                                            ],
+                                        },
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "search_keyword",
+                                            "label": "【快捷搜索】单曲直接搜索下载",
+                                            "placeholder": "例如输入: 周杰伦 晴天 或 Taylor Swift Cruel Summer",
+                                        },
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                    {
+                        "component": "VDivider",
+                        "props": {"class": "my-4"},
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
                                             "model": "music_dir",
                                             "label": "音乐存储根目录",
                                             "placeholder": "/media/music",
@@ -332,6 +397,9 @@ class SpotifyMusic(_PluginBase):
         ]
         default_config = {
             "enabled": False,
+            "add_spotify_url": "",
+            "add_sync_mode": "only_new",
+            "search_keyword": "",
             "music_dir": "/media/music",
             "format": "mp3",
             "bitrate": "320",
@@ -371,7 +439,7 @@ class SpotifyMusic(_PluginBase):
                 f"• 【{s.get('type', '').upper()}】{s.get('name')} | 模式: {mode_text} | "
                 f"已下载: {s.get('downloaded_tracks', 0)} 首 | 上次检查: {last_chk}"
             )
-        subs_summary = "\n".join(sub_list_text) if sub_list_text else "暂无活跃订阅。可通过独立工作台添加歌单与歌手订阅。"
+        subs_summary = "\n".join(sub_list_text) if sub_list_text else "暂无活跃订阅。可通过插件配置直接添加 Spotify 链接。"
 
         recent_task_text = []
         for t in tasks[:8]:
@@ -386,36 +454,40 @@ class SpotifyMusic(_PluginBase):
         return [
             {
                 "component": "VCard",
-                "props": {"class": "mb-4", "color": "surface-variant"},
+                "props": {"class": "mb-4"},
                 "content": [
                     {
                         "component": "VCardTitle",
-                        "text": "🎧 Spotify 音乐搜索与管理工作台",
+                        "text": "🎵 Spotify 音乐服务运行概况",
                     },
                     {
                         "component": "VCardText",
                         "text": (
-                            "插件已内置全功能响应式交互工作台，支持单曲实时搜索、封面与时长查看、一键下载、Spotify 歌单增量订阅管理及实时下载进度监控。\n\n"
-                            "🔗 工作台访问路径：/api/v1/plugin/SpotifyMusic/ui\n"
-                            "💡 提示：在浏览器新标签页中打开上述地址，即可使用专属的音乐搜索与订阅交互页面！"
+                            f"【运行状态】已激活订阅: {len(subs)} 个 | 进行中任务: {len(active_tasks)} 个 | 已完成: {len(completed_tasks)} 条 | 失败: {len(failed_tasks)} 条\n\n"
+                            f"【💡 快速使用指引】\n"
+                            f"1. 点击当前插件右上角的【设置 (齿轮)】按钮；\n"
+                            f"2. 在【快捷添加】栏粘贴 Spotify 单曲/专辑/歌单/艺术家链接，选择【仅监控新增】或【全量订阅】，点击【保存】即可自动后台执行！\n"
+                            f"3. 在【快捷搜索】栏输入 '歌手 歌名'（如 '周杰伦 晴天'），点击【保存】即可自动匹配下载并归档！\n\n"
+                            f"【已订阅的歌单与艺术家】\n{subs_summary}\n\n"
+                            f"【最近任务动态】\n{tasks_summary}"
                         ),
                     },
                 ],
             },
             {
                 "component": "VCard",
-                "props": {"class": "mb-4"},
+                "props": {"class": "mb-4", "color": "surface-variant"},
                 "content": [
                     {
                         "component": "VCardTitle",
-                        "text": "📊 运行状态与订阅概况",
+                        "text": "🎧 全屏音乐搜索与管理工作台",
                     },
                     {
                         "component": "VCardText",
                         "text": (
-                            f"【状态统计】已激活订阅: {len(subs)} 个 | 排队与下载中: {len(active_tasks)} 个 | 已完成: {len(completed_tasks)} 条 | 失败: {len(failed_tasks)} 条\n\n"
-                            f"【已订阅的歌单与艺术家】\n{subs_summary}\n\n"
-                            f"【最近任务动态】\n{tasks_summary}"
+                            "插件同时内置了独立的响应式 Web 交互工作台（无需在设置中反复保存，直接在网页中实时搜索、看封面、一键下载与监控任务）。\n\n"
+                            "🔗 访问路径：/api/v1/plugin/SpotifyMusic/ui\n"
+                            "💡 提示：在浏览器新标签页中直接打开上述路径即可使用。"
                         ),
                     },
                 ],
@@ -429,7 +501,7 @@ class SpotifyMusic(_PluginBase):
                 "path": "/ui",
                 "endpoint": self.api_ui,
                 "methods": ["GET"],
-                "auth": "apikey",
+                "allow_anonymous": True,
                 "summary": "音乐搜索与订阅独立工作台 UI",
                 "description": "返回内置 SPA 交互工作台 HTML 界面",
             },

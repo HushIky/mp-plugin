@@ -64,23 +64,68 @@ def render_music_workbench_html(plugin_name: str = "Spotify 音乐工作台", ap
         </div>
       </div>
 
-      <!-- 选项卡切换 -->
-      <div class="flex items-center gap-1.5 bg-slate-800/80 p-1.5 rounded-xl border border-slate-700/50">
+      <!-- 选项卡切换 与 Token 设置 -->
+      <div class="flex items-center gap-3">
+        <div class="flex items-center gap-1.5 bg-slate-800/80 p-1.5 rounded-xl border border-slate-700/50">
+          <button 
+            v-for="tab in tabs" 
+            :key="tab.id"
+            @click="activeTab = tab.id"
+            :class="activeTab === tab.id ? 'bg-emerald-600 text-white shadow-lg' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-700/50'"
+            class="px-4 py-2 rounded-lg text-sm font-medium transition flex items-center gap-2"
+          >
+            <i :class="tab.icon"></i>
+            {{ tab.name }}
+            <span v-if="tab.id === 'tasks' && activeTaskCount > 0" class="px-1.5 py-0.5 text-xs rounded-full bg-emerald-400 text-slate-900 font-bold">
+              {{ activeTaskCount }}
+            </span>
+          </button>
+        </div>
+
         <button 
-          v-for="tab in tabs" 
-          :key="tab.id"
-          @click="activeTab = tab.id"
-          :class="activeTab === tab.id ? 'bg-emerald-600 text-white shadow-lg' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-700/50'"
-          class="px-4 py-2 rounded-lg text-sm font-medium transition flex items-center gap-2"
+          @click="showTokenModal = true"
+          title="配置 API Token 凭证"
+          class="p-2.5 rounded-xl bg-slate-800/80 hover:bg-slate-700 text-slate-400 hover:text-emerald-400 border border-slate-700/50 transition"
         >
-          <i :class="tab.icon"></i>
-          {{{{ tab.name }}}}
-          <span v-if="tab.id === 'tasks' && activeTaskCount > 0" class="px-1.5 py-0.5 text-xs rounded-full bg-emerald-400 text-slate-900 font-bold">
-            {{{{ activeTaskCount }}}}
-          </span>
+          <i class="fa-solid fa-key"></i>
         </button>
       </div>
     </header>
+
+    <!-- Token 配置模态框 -->
+    <div v-if="showTokenModal" class="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
+      <div class="glass rounded-2xl p-6 max-w-md w-full space-y-4 border border-slate-700 shadow-2xl">
+        <div class="flex items-center justify-between">
+          <h3 class="text-base font-bold text-white flex items-center gap-2">
+            <i class="fa-solid fa-key text-emerald-400"></i>
+            配置 MoviePilot API Token
+          </h3>
+          <button v-if="token" @click="showTokenModal = false" class="text-slate-400 hover:text-white">
+            <i class="fa-solid fa-xmark"></i>
+          </button>
+        </div>
+        <p class="text-xs text-slate-400 leading-relaxed">
+          请输入 MoviePilot 的 API Token 进行鉴权。可在 MoviePilot Web 界面<b>【设置 -> 基础设置 -> API Token】</b>中查看。凭证将安全保存在您的本地浏览器中。
+        </p>
+        <div>
+          <input 
+            v-model="tokenInput" 
+            type="password" 
+            placeholder="输入 API Token..." 
+            class="w-full px-4 py-3 bg-slate-800/90 border border-slate-700 rounded-xl text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500 text-sm"
+          >
+        </div>
+        <div class="flex justify-end gap-2 pt-2">
+          <button 
+            @click="saveToken" 
+            :disabled="!tokenInput.trim()"
+            class="px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-sm font-medium transition"
+          >
+            保存并连接
+          </button>
+        </div>
+      </div>
+    </div>
 
     <!-- 消息提示 Toast -->
     <div v-if="toast.show" class="fixed bottom-6 right-6 z-50 flex items-center gap-3 px-5 py-3.5 rounded-xl shadow-2xl text-sm font-medium transition-all"
@@ -430,10 +475,23 @@ def render_music_workbench_html(plugin_name: str = "Spotify 音乐工作台", ap
       setup() {{
         const apiPrefix = '{api_prefix}';
         const urlParams = new URLSearchParams(window.location.search);
-        const token = urlParams.get('token') || urlParams.get('apikey') || localStorage.getItem('mp_api_token') || '';
-        if (token) {{
-          localStorage.setItem('mp_api_token', token);
+        const token = ref(urlParams.get('token') || urlParams.get('apikey') || localStorage.getItem('mp_api_token') || '');
+        if (token.value) {{
+          localStorage.setItem('mp_api_token', token.value);
         }}
+
+        const showTokenModal = ref(!token.value);
+        const tokenInput = ref(token.value);
+
+        const saveToken = () => {{
+          if (!tokenInput.value.trim()) return;
+          token.value = tokenInput.value.trim();
+          localStorage.setItem('mp_api_token', token.value);
+          showTokenModal.value = false;
+          showToast('API Token 已保存！');
+          fetchTasks();
+          fetchSubscriptions();
+        }};
 
         const tabs = [
           {{ id: 'search', name: '单曲搜索下载', icon: 'fa-solid fa-magnifying-glass' }},
@@ -456,15 +514,16 @@ def render_music_workbench_html(plugin_name: str = "Spotify 音乐工作台", ap
             'Content-Type': 'application/json',
             ...(options.headers || {{}})
           }};
-          if (token) {{
-            headers['X-API-Key'] = token;
+          if (token.value) {{
+            headers['X-API-Key'] = token.value;
           }}
           const delim = path.includes('?') ? '&' : '?';
-          const fullUrl = `${{apiPrefix}}${{path}}${{token ? delim + 'token=' + encodeURIComponent(token) : ''}}`;
+          const fullUrl = `${{apiPrefix}}${{path}}${{token.value ? delim + 'token=' + encodeURIComponent(token.value) : ''}}`;
           try {{
             const res = await fetch(fullUrl, {{ ...options, headers }});
             if (res.status === 401) {{
-              showToast('API 鉴权失败，请在 URL 中携带 ?token=<您的MoviePilot API Token>', 'error');
+              showTokenModal.value = true;
+              showToast('请配置 MoviePilot API Token 以进行鉴权', 'error');
               throw new Error('未授权');
             }}
             const data = await res.json();
@@ -660,7 +719,11 @@ def render_music_workbench_html(plugin_name: str = "Spotify 音乐工作台", ap
           getStatusText,
           getStatusBadgeClass,
           subscriptions,
-          fetchSubscriptions
+          fetchSubscriptions,
+          showTokenModal,
+          tokenInput,
+          saveToken,
+          token,
         }};
       }}
     }}).mount('#app');
