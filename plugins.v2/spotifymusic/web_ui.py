@@ -62,7 +62,7 @@ def render_music_workbench_html(
         <div>
           <h1 class="text-xl font-bold tracking-tight text-white flex items-center gap-2">
             Spotify 音乐搜索与订阅工作台
-            <span class="text-xs font-normal px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">v1.1.11</span>
+            <span class="text-xs font-normal px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">v1.1.12</span>
           </h1>
           <p class="text-xs text-slate-400">高品质音频下载 • 元数据/歌词/封面打标 • 增量订阅管理</p>
         </div>
@@ -284,24 +284,36 @@ def render_music_workbench_html(
                   </div>
                 </div>
               </div>
-              <div class="mt-4 pt-3 border-t border-slate-700/50 flex items-center justify-end gap-2">
+              <div class="mt-4 pt-3 border-t border-slate-700/50 flex flex-wrap items-center justify-end gap-2">
+                <button 
+                  @click="subscribeEntity(item, 'once')"
+                  :disabled="subscribingMap[(item.id || item.url) + '_once']"
+                  class="px-3 py-1.5 rounded-lg text-xs font-medium transition flex items-center gap-1 bg-slate-700 hover:bg-slate-600 disabled:opacity-50 text-slate-200 border border-slate-600"
+                  title="单次批量下载该艺术家全部作品，不建立长期巡检订阅"
+                >
+                  <i v-if="subscribingMap[(item.id || item.url) + '_once']" class="fa-solid fa-spinner fa-spin"></i>
+                  <i v-else class="fa-solid fa-download"></i>
+                  <span>下载全部</span>
+                </button>
                 <button 
                   @click="subscribeEntity(item, 'only_new')"
-                  :disabled="subscribingMap[item.id || item.url]"
+                  :disabled="subscribingMap[(item.id || item.url) + '_only_new']"
                   class="px-3 py-1.5 rounded-lg text-xs font-medium transition flex items-center gap-1 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white shadow-sm"
+                  title="建立长期订阅，跳过历史作品，后续仅自动下载新发行的专辑与单曲"
                 >
-                  <i v-if="subscribingMap[item.id || item.url]" class="fa-solid fa-spinner fa-spin"></i>
-                  <i v-else class="fa-solid fa-rss"></i>
+                  <i v-if="subscribingMap[(item.id || item.url) + '_only_new']" class="fa-solid fa-spinner fa-spin"></i>
+                  <i v-else class="fa-solid fa-seedling"></i>
                   <span>仅监控新增</span>
                 </button>
                 <button 
-                  @click="subscribeEntity(item, 'full')"
-                  :disabled="subscribingMap[item.id || item.url]"
-                  class="px-3 py-1.5 rounded-lg text-xs font-medium transition flex items-center gap-1 bg-slate-700 hover:bg-slate-600 disabled:opacity-50 text-slate-200"
+                  @click="subscribeEntity(item, 'all')"
+                  :disabled="subscribingMap[(item.id || item.url) + '_all']"
+                  class="px-3 py-1.5 rounded-lg text-xs font-medium transition flex items-center gap-1 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white shadow-sm"
+                  title="建立长期订阅，立即全量下载历史作品并持续巡检监控新作品"
                 >
-                  <i v-if="subscribingMap[item.id || item.url]" class="fa-solid fa-spinner fa-spin"></i>
+                  <i v-if="subscribingMap[(item.id || item.url) + '_all']" class="fa-solid fa-spinner fa-spin"></i>
                   <i v-else class="fa-solid fa-box-archive"></i>
-                  <span>全量同步</span>
+                  <span>全量订阅</span>
                 </button>
               </div>
             </div>
@@ -354,15 +366,26 @@ def render_music_workbench_html(
                   </div>
                 </div>
               </div>
-              <div class="mt-4 pt-3 border-t border-slate-700/50 flex items-center justify-end">
+              <div class="mt-4 pt-3 border-t border-slate-700/50 flex flex-wrap items-center justify-end gap-2">
                 <button 
-                  @click="subscribeEntity(item, 'full')"
-                  :disabled="subscribingMap[item.id || item.url]"
-                  class="px-4 py-1.5 rounded-lg text-xs font-medium transition flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white"
+                  @click="subscribeEntity(item, 'once')"
+                  :disabled="subscribingMap[(item.id || item.url) + '_once']"
+                  class="px-3.5 py-1.5 rounded-lg text-xs font-medium transition flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white shadow-sm"
+                  title="单次批量下载整张专辑全部曲目，不建立长期定时巡检"
                 >
-                  <i v-if="subscribingMap[item.id || item.url]" class="fa-solid fa-spinner fa-spin"></i>
+                  <i v-if="subscribingMap[(item.id || item.url) + '_once']" class="fa-solid fa-spinner fa-spin"></i>
                   <i v-else class="fa-solid fa-cloud-arrow-down"></i>
-                  <span>一键下载专辑</span>
+                  <span>下载专辑</span>
+                </button>
+                <button 
+                  @click="subscribeEntity(item, 'all')"
+                  :disabled="subscribingMap[(item.id || item.url) + '_all']"
+                  class="px-3.5 py-1.5 rounded-lg text-xs font-medium transition flex items-center gap-1.5 bg-slate-700 hover:bg-slate-600 disabled:opacity-50 text-slate-200 border border-slate-600"
+                  title="建立长期订阅并下载该专辑，持续监控更新"
+                >
+                  <i v-if="subscribingMap[(item.id || item.url) + '_all']" class="fa-solid fa-spinner fa-spin"></i>
+                  <i v-else class="fa-solid fa-box-archive"></i>
+                  <span>订阅专辑</span>
                 </button>
               </div>
             </div>
@@ -477,15 +500,36 @@ def render_music_workbench_html(
                   </div>
                 </div>
               </div>
-              <div class="mt-4 pt-3 border-t border-slate-700/50 flex items-center justify-end">
+              <div class="mt-4 pt-3 border-t border-slate-700/50 flex flex-wrap items-center justify-end gap-2">
                 <button 
-                  @click="subscribeEntity(item, 'full')"
-                  :disabled="subscribingMap[item.id || item.url]"
-                  class="px-4 py-1.5 rounded-lg text-xs font-medium transition flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white"
+                  @click="subscribeEntity(item, 'once')"
+                  :disabled="subscribingMap[(item.id || item.url) + '_once']"
+                  class="px-3 py-1.5 rounded-lg text-xs font-medium transition flex items-center gap-1 bg-slate-700 hover:bg-slate-600 disabled:opacity-50 text-slate-200 border border-slate-600"
+                  title="单次批量下载歌单当前所有曲目，不建立长期定时巡检"
                 >
-                  <i v-if="subscribingMap[item.id || item.url]" class="fa-solid fa-spinner fa-spin"></i>
-                  <i v-else class="fa-solid fa-rss"></i>
-                  <span>一键订阅歌单</span>
+                  <i v-if="subscribingMap[(item.id || item.url) + '_once']" class="fa-solid fa-spinner fa-spin"></i>
+                  <i v-else class="fa-solid fa-download"></i>
+                  <span>下载歌单</span>
+                </button>
+                <button 
+                  @click="subscribeEntity(item, 'only_new')"
+                  :disabled="subscribingMap[(item.id || item.url) + '_only_new']"
+                  class="px-3 py-1.5 rounded-lg text-xs font-medium transition flex items-center gap-1 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white shadow-sm"
+                  title="建立长期订阅，跳过当前存量曲目，后续歌单有新曲目加入时自动下载"
+                >
+                  <i v-if="subscribingMap[(item.id || item.url) + '_only_new']" class="fa-solid fa-spinner fa-spin"></i>
+                  <i v-else class="fa-solid fa-seedling"></i>
+                  <span>仅监控新增</span>
+                </button>
+                <button 
+                  @click="subscribeEntity(item, 'all')"
+                  :disabled="subscribingMap[(item.id || item.url) + '_all']"
+                  class="px-3 py-1.5 rounded-lg text-xs font-medium transition flex items-center gap-1 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white shadow-sm"
+                  title="建立长期订阅，立即下载当前全部曲目并持续监控新加曲目"
+                >
+                  <i v-if="subscribingMap[(item.id || item.url) + '_all']" class="fa-solid fa-spinner fa-spin"></i>
+                  <i v-else class="fa-solid fa-box-archive"></i>
+                  <span>全量订阅</span>
                 </button>
               </div>
             </div>
@@ -1042,21 +1086,32 @@ def render_music_workbench_html(
           }}
         }};
 
-        const subscribeEntity = async (item, mode = 'full') => {{
-          const key = item.id || item.url;
+        const subscribeEntity = async (item, mode = 'all') => {{
+          const modeKey = mode === 'full' ? 'all' : mode;
+          const key = (item.id || item.url) + '_' + modeKey;
           subscribingMap.value[key] = true;
           try {{
-            await request('/subscriptions/add', {{
+            const res = await request('/subscriptions/add', {{
               method: 'POST',
               body: JSON.stringify({{
                 url: item.url,
-                sync_mode: mode,
+                sync_mode: modeKey,
               }})
             }});
-            showToast(`已成功添加《${{item.title || item.name}}》订阅！`);
+            const name = item.title || item.name;
+            if (res && res.message) {{
+              showToast(res.message);
+            }} else if (modeKey === 'once') {{
+              showToast(`已提交《${{name}}》单次批量下载任务！`);
+            }} else if (modeKey === 'only_new') {{
+              showToast(`已成功添加《${{name}}》【仅监控新增】订阅！`);
+            }} else {{
+              showToast(`已成功添加《${{name}}》【全量订阅】！`);
+            }}
             fetchSubscriptions();
+            fetchTasks();
           }} catch (e) {{
-            showToast('添加订阅失败: ' + (e.message || e), 'error');
+            showToast('操作失败: ' + (e.message || e), 'error');
           }} finally {{
             subscribingMap.value[key] = false;
           }}

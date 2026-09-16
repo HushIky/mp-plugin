@@ -37,7 +37,7 @@ class SpotifyMusic(_PluginBase):
     plugin_name = "Spotify音乐下载与订阅"
     plugin_desc = "支持 Spotify 链接解析、音乐搜索、歌单/艺术家增量订阅、元数据标签/封面/歌词内嵌与目录自动整理。"
     plugin_icon = "spotifymusic.png"
-    plugin_version = "1.1.11"
+    plugin_version = "1.1.12"
     plugin_label = "音乐管理"
     plugin_author = "local"
     plugin_order = 10
@@ -762,7 +762,16 @@ class SpotifyMusic(_PluginBase):
             return {"success": False, "message": "插件尚未初始化"}
 
         url = str(payload.get("url") or "").strip()
-        sync_mode = str(payload.get("sync_mode") or "all").strip()  # 'all' 或 'only_new'
+        sync_mode_raw = str(payload.get("sync_mode") or "all").strip()
+        if sync_mode_raw in ("full", "all"):
+            sync_mode = "all"
+        elif sync_mode_raw in ("once", "single"):
+            sync_mode = "once"
+        elif sync_mode_raw == "only_new":
+            sync_mode = "only_new"
+        else:
+            sync_mode = sync_mode_raw
+
         interval_min = int(payload.get("interval_minutes") or self._interval_minutes)
 
         try:
@@ -826,7 +835,27 @@ class SpotifyMusic(_PluginBase):
                 else:
                     base_count = self._db.batch_record_existing_base(sub_id, tracks)
                     self._db.update_subscription_stats(sub_id, total_tracks=len(tracks))
-                    msg = f"订阅成功！已建立 {base_count} 首存量基准，后续仅同步新增曲目。"
+                    type_str = "专辑" if sub_type == "album" else "歌单"
+                    msg = f"{type_str}订阅成功！已建立 {base_count} 首存量基准，后续仅同步新增曲目。"
+            elif sync_mode == "once":
+                if sub_type == "artist":
+                    total_count = len(tracks) or sum(int(r.get("total_tracks") or 1) for r in (entity.get("releases") or [])) or len(entity.get("releases") or [])
+                    self._db.update_subscription_stats(sub_id, total_tracks=total_count)
+                    threading.Thread(
+                        target=self._sync_single_subscription,
+                        args=(sub_record,),
+                        daemon=True,
+                        name=f"SpotifyMusicArtistSync-{sub_id}",
+                    ).start()
+                    msg = f"已创建艺术家单次下载任务！正在后台下载该艺术家全部作品（约 {total_count} 首）。"
+                else:
+                    enqueued = 0
+                    for t in tracks:
+                        self._queue_mgr.submit_track(t, subscription_id=sub_id, playlist_name=name)
+                        enqueued += 1
+                    self._db.update_subscription_stats(sub_id, total_tracks=len(tracks))
+                    type_str = "专辑" if sub_type == "album" else "歌单"
+                    msg = f"已成功提交{type_str}《{name}》下载任务！已将全部 {enqueued} 首曲目推入下载队列。"
             else:
                 if sub_type == "artist":
                     # 艺术家全量同步：异步触发全部 Releases 与专辑曲目下载
@@ -846,7 +875,8 @@ class SpotifyMusic(_PluginBase):
                         self._queue_mgr.submit_track(t, subscription_id=sub_id, playlist_name=name)
                         enqueued += 1
                     self._db.update_subscription_stats(sub_id, total_tracks=len(tracks))
-                    msg = f"订阅成功！已将全部 {enqueued} 首曲目推入下载队列。"
+                    type_str = "专辑" if sub_type == "album" else "歌单"
+                    msg = f"{type_str}全量订阅成功！已将全部 {enqueued} 首曲目推入下载队列并开启持续巡检。"
 
             return {"success": True, "message": msg, "data": sub_record}
         except Exception as e:
