@@ -62,7 +62,7 @@ def render_music_workbench_html(
         <div>
           <h1 class="text-xl font-bold tracking-tight text-white flex items-center gap-2">
             Spotify 音乐搜索与订阅工作台
-            <span class="text-xs font-normal px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">v1.1.10</span>
+            <span class="text-xs font-normal px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">v1.1.11</span>
           </h1>
           <p class="text-xs text-slate-400">高品质音频下载 • 元数据/歌词/封面打标 • 增量订阅管理</p>
         </div>
@@ -853,9 +853,10 @@ def render_music_workbench_html(
 
           <div class="pt-3 border-t border-slate-700/50 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-400">
             <div class="flex items-center gap-3">
-              <span>已下载: <b class="text-white">{{{{ sub.downloaded_tracks || 0 }}}}</b> / {{{{ sub.total_tracks || 0 }}}} 首</span>
-              <span v-if="sub.sync_mode === 'only_new' && sub.skipped_tracks" class="px-2 py-0.5 rounded bg-slate-800 text-emerald-400 border border-emerald-500/20 text-[11px]" :title="'仅监控新增模式已跳过存量基准曲目 ' + sub.skipped_tracks + ' 首'">
-                已跳过存量: {{{{ sub.skipped_tracks }}}} 首
+              <span v-if="sub.sync_mode === 'only_new'">已下载: <b class="text-white">{{{{ sub.downloaded_tracks || 0 }}}}</b> 首</span>
+              <span v-else>已下载: <b class="text-white">{{{{ sub.downloaded_tracks || 0 }}}}</b> / {{{{ Math.max(sub.total_tracks || 0, sub.downloaded_tracks || 0) }}}} 首</span>
+              <span v-if="sub.sync_mode === 'only_new' && (sub.skipped_tracks || sub.total_tracks)" class="px-2 py-0.5 rounded bg-slate-800 text-emerald-400 border border-emerald-500/20 text-[11px]" :title="'仅监控新增模式已跳过存量基准曲目 ' + (sub.skipped_tracks || sub.total_tracks) + ' 首'">
+                已跳过存量: {{{{ sub.skipped_tracks || sub.total_tracks }}}} 首
               </span>
             </div>
             <div class="flex items-center gap-2">

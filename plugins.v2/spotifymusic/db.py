@@ -117,10 +117,12 @@ class MusicDatabase:
             return dict(row) if row else {"id": sub_id}
 
     def list_subscriptions(self) -> List[Dict[str, Any]]:
-        """获取所有订阅列表（附带已跳过存量计数）。"""
+        """获取所有订阅列表（附带动态统计已下载与已跳过存量计数）。"""
         with self._lock, self._connect() as conn:
             rows = conn.execute("""
-                SELECT s.*,
+                SELECT s.id, s.type, s.spotify_id, s.name, s.url, s.cover_url, s.interval_minutes, s.sync_mode, s.enabled, s.last_checked, s.created_at,
+                       MAX(s.total_tracks, COALESCE((SELECT COUNT(*) FROM subscription_history WHERE subscription_id = s.id), 0)) AS total_tracks,
+                       MAX(s.downloaded_tracks, COALESCE((SELECT COUNT(*) FROM subscription_history WHERE subscription_id = s.id AND status = 'downloaded'), 0)) AS downloaded_tracks,
                        COALESCE((SELECT COUNT(*) FROM subscription_history WHERE subscription_id = s.id AND status = 'existing_base'), 0) AS skipped_tracks
                 FROM subscriptions s
                 ORDER BY s.id DESC
@@ -128,10 +130,12 @@ class MusicDatabase:
             return [dict(r) for r in rows]
 
     def get_subscription(self, sub_id: int) -> Optional[Dict[str, Any]]:
-        """按 ID 获取订阅详情（附带已跳过存量计数）。"""
+        """按 ID 获取订阅详情（附带动态统计已下载与已跳过存量计数）。"""
         with self._lock, self._connect() as conn:
             row = conn.execute("""
-                SELECT s.*,
+                SELECT s.id, s.type, s.spotify_id, s.name, s.url, s.cover_url, s.interval_minutes, s.sync_mode, s.enabled, s.last_checked, s.created_at,
+                       MAX(s.total_tracks, COALESCE((SELECT COUNT(*) FROM subscription_history WHERE subscription_id = s.id), 0)) AS total_tracks,
+                       MAX(s.downloaded_tracks, COALESCE((SELECT COUNT(*) FROM subscription_history WHERE subscription_id = s.id AND status = 'downloaded'), 0)) AS downloaded_tracks,
                        COALESCE((SELECT COUNT(*) FROM subscription_history WHERE subscription_id = s.id AND status = 'existing_base'), 0) AS skipped_tracks
                 FROM subscriptions s
                 WHERE s.id = ?
@@ -167,7 +171,7 @@ class MusicDatabase:
                 conn.execute(
                     """
                     UPDATE subscriptions
-                    SET total_tracks = ?,
+                    SET total_tracks = MAX(?, total_tracks),
                         downloaded_tracks = downloaded_tracks + ?,
                         last_checked = ?
                     WHERE id = ?
