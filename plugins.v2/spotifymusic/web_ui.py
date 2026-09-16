@@ -62,7 +62,7 @@ def render_music_workbench_html(
         <div>
           <h1 class="text-xl font-bold tracking-tight text-white flex items-center gap-2">
             Spotify 音乐搜索与订阅工作台
-            <span class="text-xs font-normal px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">v1.1.4</span>
+            <span class="text-xs font-normal px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">v1.1.7</span>
           </h1>
           <p class="text-xs text-slate-400">高品质音频下载 • 元数据/歌词/封面打标 • 增量订阅管理</p>
         </div>
@@ -286,7 +286,7 @@ def render_music_workbench_html(
                 <button 
                   @click="subscribeEntity(item, 'only_new')"
                   :disabled="subscribingMap[item.id || item.url]"
-                  class="px-3 py-1.5 rounded-lg text-xs font-medium transition flex items-center gap-1 bg-emerald-600 hover:bg-emerald-500 text-white shadow-sm"
+                  class="px-3 py-1.5 rounded-lg text-xs font-medium transition flex items-center gap-1 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white shadow-sm"
                 >
                   <i v-if="subscribingMap[item.id || item.url]" class="fa-solid fa-spinner fa-spin"></i>
                   <i v-else class="fa-solid fa-rss"></i>
@@ -295,8 +295,10 @@ def render_music_workbench_html(
                 <button 
                   @click="subscribeEntity(item, 'full')"
                   :disabled="subscribingMap[item.id || item.url]"
-                  class="px-3 py-1.5 rounded-lg text-xs font-medium transition flex items-center gap-1 bg-slate-700 hover:bg-slate-600 text-slate-200"
+                  class="px-3 py-1.5 rounded-lg text-xs font-medium transition flex items-center gap-1 bg-slate-700 hover:bg-slate-600 disabled:opacity-50 text-slate-200"
                 >
+                  <i v-if="subscribingMap[item.id || item.url]" class="fa-solid fa-spinner fa-spin"></i>
+                  <i v-else class="fa-solid fa-box-archive"></i>
                   <span>全量同步</span>
                 </button>
               </div>
@@ -352,7 +354,7 @@ def render_music_workbench_html(
                 <button 
                   @click="subscribeEntity(item, 'full')"
                   :disabled="subscribingMap[item.id || item.url]"
-                  class="px-4 py-1.5 rounded-lg text-xs font-medium transition flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-500 text-white"
+                  class="px-4 py-1.5 rounded-lg text-xs font-medium transition flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white"
                 >
                   <i v-if="subscribingMap[item.id || item.url]" class="fa-solid fa-spinner fa-spin"></i>
                   <i v-else class="fa-solid fa-cloud-arrow-down"></i>
@@ -473,7 +475,7 @@ def render_music_workbench_html(
                 <button 
                   @click="subscribeEntity(item, 'full')"
                   :disabled="subscribingMap[item.id || item.url]"
-                  class="px-4 py-1.5 rounded-lg text-xs font-medium transition flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-500 text-white"
+                  class="px-4 py-1.5 rounded-lg text-xs font-medium transition flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white"
                 >
                   <i v-if="subscribingMap[item.id || item.url]" class="fa-solid fa-spinner fa-spin"></i>
                   <i v-else class="fa-solid fa-rss"></i>
@@ -557,25 +559,28 @@ def render_music_workbench_html(
               <button 
                 @click="submitSubscription('only_new')"
                 :disabled="submittingSub"
-                class="px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-medium transition flex items-center gap-2 shadow-lg"
+                class="px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-sm font-medium transition flex items-center gap-2 shadow-lg"
               >
-                <i class="fa-solid fa-seedling"></i>
+                <i v-if="submittingSub" class="fa-solid fa-spinner fa-spin"></i>
+                <i v-else class="fa-solid fa-seedling"></i>
                 <span>🌿 仅监控新增订阅 (推荐)</span>
               </button>
               <button 
                 @click="submitSubscription('all')"
                 :disabled="submittingSub"
-                class="px-5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium transition flex items-center gap-2 shadow-lg"
+                class="px-5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white text-sm font-medium transition flex items-center gap-2 shadow-lg"
               >
-                <i class="fa-solid fa-box-archive"></i>
+                <i v-if="submittingSub" class="fa-solid fa-spinner fa-spin"></i>
+                <i v-else class="fa-solid fa-box-archive"></i>
                 <span>📦 全量订阅 (立即全下+持续监控)</span>
               </button>
               <button 
                 @click="submitSubscription('once')"
                 :disabled="submittingSub"
-                class="px-5 py-2.5 rounded-xl bg-slate-700 hover:bg-slate-600 text-slate-200 text-sm font-medium transition flex items-center gap-2"
+                class="px-5 py-2.5 rounded-xl bg-slate-700 hover:bg-slate-600 disabled:opacity-50 text-slate-200 text-sm font-medium transition flex items-center gap-2"
               >
-                <i class="fa-solid fa-download"></i>
+                <i v-if="submittingSub" class="fa-solid fa-spinner fa-spin"></i>
+                <i v-else class="fa-solid fa-download"></i>
                 <span>⚡ 单次批量下载 (不建长期订阅)</span>
               </button>
             </div>
@@ -841,12 +846,15 @@ def render_music_workbench_html(
           </div>
 
           <div class="pt-3 border-t border-slate-700/50 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-400">
-            <div>
-              已下载: <b class="text-white">{{{{ sub.downloaded_tracks || 0 }}}}</b> / {{{{ sub.total_tracks || 0 }}}} 首
+            <div class="flex items-center gap-3">
+              <span>已下载: <b class="text-white">{{{{ sub.downloaded_tracks || 0 }}}}</b> / {{{{ sub.total_tracks || 0 }}}} 首</span>
+              <span v-if="sub.sync_mode === 'only_new' && sub.skipped_tracks" class="px-2 py-0.5 rounded bg-slate-800 text-emerald-400 border border-emerald-500/20 text-[11px]" :title="'仅监控新增模式已跳过存量基准曲目 ' + sub.skipped_tracks + ' 首'">
+                已跳过存量: {{{{ sub.skipped_tracks }}}} 首
+              </span>
             </div>
             <div class="flex items-center gap-2">
-              <span class="text-[11px] text-slate-500 hidden sm:inline">
-                上次: {{{{ (sub.last_checked || sub.last_check) ? (sub.last_checked || sub.last_check).slice(0, 16).replace('T', ' ') : '未执行' }}}}
+              <span class="text-[11px] text-slate-500 hidden sm:inline" :title="'UTC: ' + (sub.last_checked || sub.last_check || '')">
+                上次: {{{{ formatTime(sub.last_checked || sub.last_check) }}}}
               </span>
               <button 
                 @click="inspectSubscription(sub)" 
@@ -1099,6 +1107,29 @@ def render_music_workbench_html(
           const m = Math.floor(sec / 60);
           const s = Math.floor(sec % 60);
           return `${{m.toString().padStart(2, '0')}}:${{s.toString().padStart(2, '0')}}`;
+        }};
+
+        const formatTime = (isoStr) => {{
+          if (!isoStr) return '未执行';
+          try {{
+            let normalized = String(isoStr).trim();
+            if (normalized.length === 19 && normalized.indexOf('T') === 10) {{
+              normalized += 'Z';
+            }}
+            const d = new Date(normalized);
+            if (isNaN(d.getTime())) {{
+              return normalized.slice(0, 16).replace('T', ' ');
+            }}
+            const pad = (n) => n.toString().padStart(2, '0');
+            const y = d.getFullYear();
+            const m = pad(d.getMonth() + 1);
+            const date = pad(d.getDate());
+            const h = pad(d.getHours());
+            const min = pad(d.getMinutes());
+            return y + '-' + m + '-' + date + ' ' + h + ':' + min;
+          }} catch (e) {{
+            return String(isoStr).slice(0, 16).replace('T', ' ');
+          }}
         }};
 
         const albumGroups = computed(() => {{
@@ -1362,6 +1393,7 @@ def render_music_workbench_html(
           expandAllAlbums,
           collapseAllAlbums,
           formatDuration,
+          formatTime,
           albumGroups,
           inspectSubscription,
           tasks,

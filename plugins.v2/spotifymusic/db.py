@@ -117,15 +117,25 @@ class MusicDatabase:
             return dict(row) if row else {"id": sub_id}
 
     def list_subscriptions(self) -> List[Dict[str, Any]]:
-        """获取所有订阅列表。"""
+        """获取所有订阅列表（附带已跳过存量计数）。"""
         with self._lock, self._connect() as conn:
-            rows = conn.execute("SELECT * FROM subscriptions ORDER BY id DESC").fetchall()
+            rows = conn.execute("""
+                SELECT s.*,
+                       COALESCE((SELECT COUNT(*) FROM subscription_history WHERE subscription_id = s.id AND status = 'existing_base'), 0) AS skipped_tracks
+                FROM subscriptions s
+                ORDER BY s.id DESC
+            """).fetchall()
             return [dict(r) for r in rows]
 
     def get_subscription(self, sub_id: int) -> Optional[Dict[str, Any]]:
-        """按 ID 获取订阅详情。"""
+        """按 ID 获取订阅详情（附带已跳过存量计数）。"""
         with self._lock, self._connect() as conn:
-            row = conn.execute("SELECT * FROM subscriptions WHERE id = ?", (sub_id,)).fetchone()
+            row = conn.execute("""
+                SELECT s.*,
+                       COALESCE((SELECT COUNT(*) FROM subscription_history WHERE subscription_id = s.id AND status = 'existing_base'), 0) AS skipped_tracks
+                FROM subscriptions s
+                WHERE s.id = ?
+            """, (sub_id,)).fetchone()
             return dict(row) if row else None
 
     def delete_subscription(self, sub_id: int) -> bool:
