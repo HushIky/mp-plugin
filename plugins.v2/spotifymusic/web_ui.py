@@ -62,7 +62,7 @@ def render_music_workbench_html(
         <div>
           <h1 class="text-xl font-bold tracking-tight text-white flex items-center gap-2">
             Spotify 音乐搜索与订阅工作台
-            <span class="text-xs font-normal px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">v1.1.7</span>
+            <span class="text-xs font-normal px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">v1.1.8</span>
           </h1>
           <p class="text-xs text-slate-400">高品质音频下载 • 元数据/歌词/封面打标 • 增量订阅管理</p>
         </div>
@@ -271,10 +271,12 @@ def render_music_workbench_html(
                   <div class="mt-2 flex items-center gap-2">
                     <span 
                       class="text-[10px] px-2 py-0.5 rounded-full border flex items-center gap-1"
-                      :class="item.source === 'spotify' ? 'bg-emerald-950/60 text-emerald-400 border-emerald-800/80' : 'bg-slate-800 text-slate-400 border-slate-700'"
+                      :class="item.source === 'spotify' ? 'bg-emerald-950/60 text-emerald-400 border-emerald-800/80' : (item.source === 'itunes' ? 'bg-rose-950/60 text-rose-300 border-rose-800/80' : 'bg-slate-800 text-slate-400 border-slate-700')"
                     >
                       <i v-if="item.source === 'spotify'" class="fa-brands fa-spotify text-emerald-400"></i>
-                      <span>{{{{ item.source === 'spotify' ? 'Spotify' : 'YouTube Music' }}}}</span>
+                      <i v-else-if="item.source === 'itunes'" class="fa-brands fa-apple text-rose-400"></i>
+                      <i v-else-if="item.source === 'ytmusic'" class="fa-brands fa-youtube text-red-400"></i>
+                      <span>{{{{ item.source === 'spotify' ? 'Spotify' : (item.source === 'itunes' ? 'Apple Music' : 'YouTube Music') }}}}</span>
                     </span>
                     <a v-if="item.url" :href="item.url" target="_blank" class="text-xs text-slate-500 hover:text-emerald-400 transition" title="在网页中打开">
                       <i class="fa-solid fa-arrow-up-right-from-square"></i>
@@ -339,10 +341,12 @@ def render_music_workbench_html(
                   <div class="mt-2 flex items-center gap-2">
                     <span 
                       class="text-[10px] px-2 py-0.5 rounded-full border flex items-center gap-1"
-                      :class="item.source === 'spotify' ? 'bg-emerald-950/60 text-emerald-400 border-emerald-800/80' : 'bg-slate-800 text-slate-400 border-slate-700'"
+                      :class="item.source === 'spotify' ? 'bg-emerald-950/60 text-emerald-400 border-emerald-800/80' : (item.source === 'itunes' ? 'bg-rose-950/60 text-rose-300 border-rose-800/80' : 'bg-slate-800 text-slate-400 border-slate-700')"
                     >
                       <i v-if="item.source === 'spotify'" class="fa-brands fa-spotify text-emerald-400"></i>
-                      <span>{{{{ item.source === 'spotify' ? 'Spotify' : 'YouTube Music' }}}}</span>
+                      <i v-else-if="item.source === 'itunes'" class="fa-brands fa-apple text-rose-400"></i>
+                      <i v-else-if="item.source === 'ytmusic'" class="fa-brands fa-youtube text-red-400"></i>
+                      <span>{{{{ item.source === 'spotify' ? 'Spotify' : (item.source === 'itunes' ? 'Apple Music' : 'YouTube Music') }}}}</span>
                     </span>
                     <a v-if="item.url" :href="item.url" target="_blank" class="text-xs text-slate-500 hover:text-emerald-400 transition" title="在网页中打开">
                       <i class="fa-solid fa-arrow-up-right-from-square"></i>
@@ -401,11 +405,13 @@ def render_music_workbench_html(
                   <div class="mt-2 flex items-center gap-2">
                     <span 
                       class="text-[10px] px-2 py-0.5 rounded-full border flex items-center gap-1"
-                      :class="item.source === 'spotify' ? 'bg-emerald-950/60 text-emerald-400 border-emerald-800/80' : 'bg-slate-800 text-slate-400 border-slate-700'"
+                      :class="item.source === 'spotify' ? 'bg-emerald-950/60 text-emerald-400 border-emerald-800/80' : (item.source === 'itunes' ? 'bg-rose-950/60 text-rose-300 border-rose-800/80' : 'bg-slate-800 text-slate-400 border-slate-700')"
                     >
                       <i v-if="item.source === 'spotify'" class="fa-brands fa-spotify text-emerald-400"></i>
+                      <i v-else-if="item.source === 'itunes'" class="fa-brands fa-apple text-rose-400"></i>
                       <i v-else-if="item.source === 'ytmusic'" class="fa-brands fa-youtube text-red-400"></i>
-                      <span>{{{{ item.source === 'spotify' ? 'Spotify' : (item.source === 'ytmusic' ? 'YouTube Music' : 'YouTube') }}}}</span>
+                      <i v-else class="fa-brands fa-youtube text-slate-400"></i>
+                      <span>{{{{ item.source === 'spotify' ? 'Spotify' : (item.source === 'itunes' ? 'Apple Music' : (item.source === 'ytmusic' ? 'YouTube Music' : 'YouTube')) }}}}</span>
                     </span>
                     <a v-if="item.url" :href="item.url" target="_blank" class="text-xs text-slate-500 hover:text-emerald-400 transition" title="在网页中打开">
                       <i class="fa-solid fa-arrow-up-right-from-square"></i>
@@ -1011,6 +1017,7 @@ def render_music_workbench_html(
           if (!searchQuery.value.trim()) return;
           searching.value = true;
           searched.value = true;
+          searchCategory.value = 'all';
           try {{
             const res = await request(`/search/query?query=${{encodeURIComponent(searchQuery.value)}}`);
             const d = (res && res.data) ? res.data : {{}};

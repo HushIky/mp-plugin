@@ -1,6 +1,6 @@
 """音频来源检索与音轨匹配器。
 
-通过 YouTube Music API 或 yt-dlp 搜索精准匹配 Spotify 曲目的最佳 YouTube 音频。
+通过 Spotify、Apple Music (iTunes)、YouTube Music API 或 yt-dlp 搜索并精准匹配音乐音轨。
 """
 
 from __future__ import annotations
@@ -8,6 +8,7 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
+import requests
 from app.log import logger
 
 try:
@@ -173,6 +174,144 @@ def match_youtube_track(
     return None
 
 
+def search_itunes_all(
+    query: str,
+    limit: int = 15,
+    proxy: Optional[str] = None,
+) -> Dict[str, List[Dict[str, Any]]]:
+    """
+    通过 Apple iTunes Search API 免 Key 搜索音乐（单曲、专辑、艺术家）。
+    无需配置任何凭据，国内/国际网络直连可用，提供高分辨率封面与丰富元数据。
+    """
+    query = (query or "").strip()
+    if not query:
+        return {"tracks": [], "albums": [], "artists": [], "playlists": []}
+
+    proxies = {"http": proxy, "https": proxy} if proxy else None
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        ),
+    }
+    base_url = "https://itunes.apple.com/search"
+
+    tracks: List[Dict[str, Any]] = []
+    albums: List[Dict[str, Any]] = []
+    artists: List[Dict[str, Any]] = []
+
+    # 1. 搜索单曲 (song)
+    try:
+        resp = requests.get(
+            base_url,
+            params={"term": query, "media": "music", "entity": "song", "limit": limit},
+            headers=headers,
+            proxies=proxies,
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            for item in resp.json().get("results", []):
+                t_id = str(item.get("trackId") or "")
+                title = item.get("trackName") or ""
+                if not t_id or not title:
+                    continue
+                artist = item.get("artistName") or "未知艺术家"
+                album = item.get("collectionName") or ""
+                dur_ms = item.get("trackTimeMillis") or 0
+                dur_sec = dur_ms // 1000
+                m, s = divmod(dur_sec, 60)
+                dur_str = f"{m:02d}:{s:02d}" if dur_sec else ""
+                artwork = item.get("artworkUrl100") or ""
+                if artwork:
+                    artwork = artwork.replace("100x100bb.jpg", "600x600bb.jpg")
+                url = item.get("trackViewUrl") or item.get("collectionViewUrl") or f"https://music.apple.com/song/{t_id}"
+
+                tracks.append({
+                    "id": t_id,
+                    "title": title,
+                    "artist": artist,
+                    "album": album,
+                    "album_artist": artist,
+                    "duration": dur_sec,
+                    "duration_str": dur_str,
+                    "cover_url": artwork,
+                    "preview_url": item.get("previewUrl") or "",
+                    "source": "itunes",
+                    "url": url,
+                })
+    except Exception as e:
+        logger.debug(f"iTunes 歌曲搜索异常: {e}")
+
+    # 2. 搜索专辑 (album)
+    try:
+        resp_alb = requests.get(
+            base_url,
+            params={"term": query, "media": "music", "entity": "album", "limit": min(limit, 8)},
+            headers=headers,
+            proxies=proxies,
+            timeout=10,
+        )
+        if resp_alb.status_code == 200:
+            for item in resp_alb.json().get("results", []):
+                alb_id = str(item.get("collectionId") or "")
+                alb_name = item.get("collectionName") or ""
+                if not alb_id or not alb_name:
+                    continue
+                artist = item.get("artistName") or "未知艺术家"
+                release_date = item.get("releaseDate") or ""
+                year = release_date.split("-")[0] if release_date else ""
+                artwork = item.get("artworkUrl100") or ""
+                if artwork:
+                    artwork = artwork.replace("100x100bb.jpg", "600x600bb.jpg")
+                url = item.get("collectionViewUrl") or f"https://music.apple.com/album/{alb_id}"
+
+                albums.append({
+                    "id": alb_id,
+                    "title": alb_name,
+                    "artist": artist,
+                    "year": year,
+                    "cover_url": artwork,
+                    "source": "itunes",
+                    "url": url,
+                })
+    except Exception as e:
+        logger.debug(f"iTunes 专辑搜索异常: {e}")
+
+    # 3. 搜索艺术家 (musicArtist)
+    try:
+        resp_art = requests.get(
+            base_url,
+            params={"term": query, "media": "music", "entity": "musicArtist", "limit": min(limit, 6)},
+            headers=headers,
+            proxies=proxies,
+            timeout=10,
+        )
+        if resp_art.status_code == 200:
+            for item in resp_art.json().get("results", []):
+                art_id = str(item.get("artistId") or "")
+                art_name = item.get("artistName") or ""
+                if not art_id or not art_name:
+                    continue
+                url = item.get("artistLinkUrl") or f"https://music.apple.com/artist/{art_id}"
+                artists.append({
+                    "id": art_id,
+                    "name": art_name,
+                    "avatar_url": "",
+                    "verified": True,
+                    "source": "itunes",
+                    "url": url,
+                })
+    except Exception as e:
+        logger.debug(f"iTunes 艺术家搜索异常: {e}")
+
+    return {
+        "tracks": tracks,
+        "albums": albums,
+        "artists": artists,
+        "playlists": [],
+    }
+
+
 def search_music_all(
     query: str,
     limit: int = 15,
@@ -182,8 +321,11 @@ def search_music_all(
 ) -> Dict[str, List[Dict[str, Any]]]:
     """
     全分类搜索音乐（单曲、专辑、艺术家、歌单）。
-    优先通过 Spotify 搜索（支持免 Key GraphQL 或官方 API），
-    若无结果或异常则自动回退至 YouTube Music API 与 yt-dlp。
+    多级自动回退机制：
+    1. Spotify 全分类搜索（免 Key GraphQL 或官方 API）；
+    2. YouTube Music 全分类搜索；
+    3. Apple iTunes Search API 免 Key 全局零配置搜索；
+    4. yt-dlp 单曲搜索。
     """
     query = (query or "").strip()
     if not query:
@@ -205,14 +347,14 @@ def search_music_all(
         logger.debug(f"Spotify 全分类搜索跳过: {e}")
 
     # 2. 默认零配置回退：YouTube Music 全分类搜索
-    tracks: List[Dict[str, Any]] = []
-    albums: List[Dict[str, Any]] = []
-    artists: List[Dict[str, Any]] = []
-    playlists: List[Dict[str, Any]] = []
-
     ytm = get_ytm_client()
     if ytm:
         try:
+            tracks: List[Dict[str, Any]] = []
+            albums: List[Dict[str, Any]] = []
+            artists: List[Dict[str, Any]] = []
+            playlists: List[Dict[str, Any]] = []
+
             # 搜索单曲
             song_res = ytm.search(query, filter="songs", limit=limit)
             for r in song_res:
@@ -299,7 +441,16 @@ def search_music_all(
         except Exception as e:
             logger.debug(f"YTMusic 全分类检索异常: {e}")
 
-    # 3. 回退 yt-dlp 搜索单曲
+    # 3. Apple iTunes Search API 免 Key 全局零配置搜索回退
+    try:
+        itunes_results = search_itunes_all(query=query, limit=limit, proxy=proxy)
+        if any(itunes_results.get(k) for k in ("tracks", "albums", "artists")):
+            return itunes_results
+    except Exception as e:
+        logger.debug(f"iTunes 全分类搜索回退异常: {e}")
+
+    # 4. 回退 yt-dlp 搜索单曲
+    tracks = []
     if _HAS_YTDLP:
         ydl_opts = {
             "quiet": True,
@@ -347,9 +498,9 @@ def search_music_all(
 
     return {
         "tracks": tracks,
-        "albums": albums,
-        "artists": artists,
-        "playlists": playlists,
+        "albums": [],
+        "artists": [],
+        "playlists": [],
     }
 
 
