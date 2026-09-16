@@ -189,6 +189,9 @@ def _format_track(entity: Dict[str, Any], spotify_id: str) -> Dict[str, Any]:
         for a in (entity.get('artists') or [])
         if isinstance(a, dict) and a.get('name')
     ]
+    if not artists and entity.get('subtitle'):
+        sub = str(entity['subtitle'])
+        artists = [a.strip() for a in sub.replace('\xa0', ' ').split(',') if a.strip()]
     if not artists and entity.get('artist'):
         artists = [str(entity.get('artist')).strip()]
 
@@ -204,6 +207,9 @@ def _format_track(entity: Dict[str, Any], spotify_id: str) -> Dict[str, Any]:
             for a in (album_obj.get('artists') or [])
             if isinstance(a, dict) and a.get('name')
         ]
+        if not album_artists and album_obj.get('subtitle'):
+            sub = str(album_obj['subtitle'])
+            album_artists = [a.strip() for a in sub.replace('\xa0', ' ').split(',') if a.strip()]
     if not album_artists:
         album_artists = list(artists)
 
@@ -250,6 +256,11 @@ def _format_album(entity: Dict[str, Any], spotify_id: str) -> Dict[str, Any]:
         for a in (entity.get('artists') or [])
         if isinstance(a, dict) and a.get('name')
     ]
+    if not artists and entity.get('subtitle'):
+        sub = str(entity['subtitle'])
+        artists = [a.strip() for a in sub.replace('\xa0', ' ').split(',') if a.strip()]
+    if not artists and entity.get('artist'):
+        artists = [str(entity['artist']).strip()]
     album_artist_str = ', '.join(artists) if artists else 'Unknown Artist'
 
     cover_url = _extract_image_url(entity.get('coverArt')) or _extract_image_url(entity)
@@ -268,7 +279,12 @@ def _format_album(entity: Dict[str, Any], spotify_id: str) -> Dict[str, Any]:
             a.get('name', '').strip()
             for a in (item.get('artists') or [])
             if isinstance(a, dict) and a.get('name')
-        ] or list(artists)
+        ]
+        if not t_artists and item.get('subtitle'):
+            sub = str(item['subtitle'])
+            t_artists = [a.strip() for a in sub.replace('\xa0', ' ').split(',') if a.strip()]
+        if not t_artists:
+            t_artists = list(artists)
         t_artist_str = ', '.join(t_artists) if t_artists else album_artist_str
 
         dur_ms = item.get('duration') or item.get('duration_ms') or 0
@@ -324,6 +340,9 @@ def _format_playlist(entity: Dict[str, Any], spotify_id: str) -> Dict[str, Any]:
             for a in (item.get('artists') or [])
             if isinstance(a, dict) and a.get('name')
         ]
+        if not t_artists and item.get('subtitle'):
+            sub = str(item['subtitle'])
+            t_artists = [a.strip() for a in sub.replace('\xa0', ' ').split(',') if a.strip()]
         t_artist_str = ', '.join(t_artists) if t_artists else 'Unknown Artist'
 
         album_obj = item.get('album', {}) if isinstance(item.get('album'), dict) else {}
@@ -333,6 +352,9 @@ def _format_playlist(entity: Dict[str, Any], spotify_id: str) -> Dict[str, Any]:
             for a in (album_obj.get('artists') or [])
             if isinstance(a, dict) and a.get('name')
         ]
+        if not album_artists and album_obj.get('subtitle'):
+            sub = str(album_obj['subtitle'])
+            album_artists = [a.strip() for a in sub.replace('\xa0', ' ').split(',') if a.strip()]
         album_artist_str = ', '.join(album_artists) if album_artists else t_artist_str
 
         dur_ms = item.get('duration') or item.get('duration_ms') or 0
