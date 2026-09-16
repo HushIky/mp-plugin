@@ -37,7 +37,7 @@ class SpotifyMusic(_PluginBase):
     plugin_name = "Spotify音乐下载与订阅"
     plugin_desc = "支持 Spotify 链接解析、音乐搜索、歌单/艺术家增量订阅、元数据标签/封面/歌词内嵌与目录自动整理。"
     plugin_icon = "spotifymusic.png"
-    plugin_version = "1.0.9"
+    plugin_version = "1.1.0"
     plugin_label = "音乐管理"
     plugin_author = "local"
     plugin_order = 10
@@ -741,10 +741,40 @@ class SpotifyMusic(_PluginBase):
 
             # 3. 处理存量曲目
             if sync_mode == "only_new":
-                # 仅监控新增：直接将当前所有曲目作为存量基准入库，不排入下载队列
-                base_count = self._db.batch_record_existing_base(sub_id, tracks)
-                self._db.update_subscription_stats(sub_id, total_tracks=len(tracks))
-                msg = f"订阅成功！已建立 {base_count} 首存量基准，后续仅同步新增曲目。"
+                # 仅监控新增：直接将当前所有唱片与曲目作为存量基准入库，不排入下载队列
+                if sub_type == "artist":
+                    releases = entity.get("releases") or []
+                    if not releases and self._spotify_client_id and self._spotify_client_secret:
+                        releases = spotify.get_spotify_artist_albums(
+                            spotify_id,
+                            self._spotify_client_id,
+                            self._spotify_client_secret,
+                            limit=50,
+                            max_pages=20,
+                            proxy=self._proxy or None,
+                        )
+                    for rel in releases:
+                        rel_id = rel.get("spotify_id")
+                        if rel_id:
+                            self._db.record_track_history(
+                                sub_id=sub_id,
+                                track_spotify_id=rel_id,
+                                track_name=rel.get("name", ""),
+                                artist_name=name,
+                                album_name=rel.get("name", ""),
+                                status="existing_base",
+                            )
+                    base_count = self._db.batch_record_existing_base(sub_id, tracks)
+                    total_count = max(len(tracks), len(releases))
+                    self._db.update_subscription_stats(sub_id, total_tracks=total_count)
+                    msg = (
+                        f"艺术家订阅成功！已建立 {len(releases)} 张唱片与 {base_count} 首曲目的存量基准，"
+                        f"后续仅自动同步该艺术家新发行的专辑与单曲。"
+                    )
+                else:
+                    base_count = self._db.batch_record_existing_base(sub_id, tracks)
+                    self._db.update_subscription_stats(sub_id, total_tracks=len(tracks))
+                    msg = f"订阅成功！已建立 {base_count} 首存量基准，后续仅同步新增曲目。"
             else:
                 if sub_type == "artist":
                     # 艺术家全量同步：异步触发全部 Releases 与专辑曲目下载
@@ -754,7 +784,7 @@ class SpotifyMusic(_PluginBase):
                         daemon=True,
                         name=f"SpotifyMusicArtistSync-{sub_id}",
                     ).start()
-                    msg = f"艺术家订阅已创建！已启动后台全量同步该艺术家全部唱片与单曲。"
+                    msg = "艺术家全量订阅已创建！已启动后台全量同步该艺术家全部唱片与单曲。"
                 else:
                     # 歌单/专辑全量同步：将现有所有曲目排入下载队列
                     enqueued = 0
@@ -863,6 +893,17 @@ class SpotifyMusic(_PluginBase):
             # 如果是艺术家，解析每个新 Release
             if sub.get("type") == "artist":
                 releases = entity.get("releases") or []
+                if not releases and self._spotify_client_id and self._spotify_client_secret:
+                    releases = spotify.get_spotify_artist_albums(
+                        sub.get("spotify_id"),
+                        self._spotify_client_id,
+                        self._spotify_client_secret,
+                        limit=50,
+                        max_pages=20,
+                        proxy=self._proxy or None,
+                    )
+                new_releases_count = 0
+                new_tracks_count = 0
                 for rel in releases:
                     rel_id = rel.get("spotify_id")
                     if not rel_id or self._db.is_track_in_history(sub_id, rel_id):
@@ -876,14 +917,43 @@ class SpotifyMusic(_PluginBase):
                             spotify_client_id=self._spotify_client_id or None,
                             spotify_client_secret=self._spotify_client_secret or None,
                         )
-                        for t in album_ent.get("tracks") or []:
+                        album_tracks = album_ent.get("tracks") or []
+                        for t in album_tracks:
                             t_id = t.get("spotify_id")
                             if t_id and not self._db.is_track_in_history(sub_id, t_id):
                                 self._queue_mgr.submit_track(t, subscription_id=sub_id, playlist_name=sub_name)
-                        self._db.record_track_history(sub_id, rel_id, rel.get("name", ""), sub_name, rel.get("name", ""))
+                                self._db.record_track_history(
+                                    sub_id=sub_id,
+                                    track_spotify_id=t_id,
+                                    track_name=t.get("title", ""),
+                                    artist_name=t.get("artist", sub_name),
+                                    album_name=t.get("album", rel.get("name", "")),
+                                    status="downloaded",
+                                )
+                                new_tracks_count += 1
+                        self._db.record_track_history(
+                            sub_id=sub_id,
+                            track_spotify_id=rel_id,
+                            track_name=rel.get("name", ""),
+                            artist_name=sub_name,
+                            album_name=rel.get("name", ""),
+                            status="downloaded",
+                        )
+                        new_releases_count += 1
                     except Exception as ex:
                         logger.debug(f"拉取艺术家 Release {rel_id} 异常: {ex}")
                 self._db.update_subscription_stats(sub_id, total_tracks=len(releases))
+                if new_releases_count > 0:
+                    logger.info(
+                        f"[{self.plugin_name}] 艺术家 [{sub_name}] 发现 {new_releases_count} 张新唱片"
+                        f" (共 {new_tracks_count} 首曲目)，已加入下载队列"
+                    )
+                    if self._notify_success:
+                        self.post_message(
+                            mtype=NotificationType.Plugin,
+                            title=f"🎵 艺术家发布新作品: {sub_name}",
+                            text=f"检测到 {new_releases_count} 张新唱片（共 {new_tracks_count} 首曲目），正在后台自动下载并整理归档。",
+                        )
                 return
 
             # 歌单/专辑的增量比对
@@ -961,13 +1031,44 @@ class SpotifyMusic(_PluginBase):
                     sync_mode="only_new",
                 )
                 sub_id = sub_record.get("id")
-                base_count = self._db.batch_record_existing_base(sub_id, tracks)
-                self._db.update_subscription_stats(sub_id, total_tracks=len(tracks))
-                self.post_message(
-                    mtype=NotificationType.Plugin,
-                    title=f"🎵 Spotify 订阅添加成功 ({name})",
-                    text=f"已成功添加长期订阅！已建立 {base_count} 首存量基准曲目，后续将自动监控并下载新增歌曲。",
-                )
+                if sub_type == "artist":
+                    releases = entity.get("releases") or []
+                    if not releases and self._spotify_client_id and self._spotify_client_secret:
+                        releases = spotify.get_spotify_artist_albums(
+                            spotify_id,
+                            self._spotify_client_id,
+                            self._spotify_client_secret,
+                            limit=50,
+                            max_pages=20,
+                            proxy=self._proxy or None,
+                        )
+                    for rel in releases:
+                        rel_id = rel.get("spotify_id")
+                        if rel_id:
+                            self._db.record_track_history(
+                                sub_id=sub_id,
+                                track_spotify_id=rel_id,
+                                track_name=rel.get("name", ""),
+                                artist_name=name,
+                                album_name=rel.get("name", ""),
+                                status="existing_base",
+                            )
+                    base_count = self._db.batch_record_existing_base(sub_id, tracks)
+                    total_count = max(len(tracks), len(releases))
+                    self._db.update_subscription_stats(sub_id, total_tracks=total_count)
+                    self.post_message(
+                        mtype=NotificationType.Plugin,
+                        title=f"🎵 Spotify 艺术家订阅成功 ({name})",
+                        text=f"已成功添加长期订阅！已建立 {len(releases)} 张唱片与 {base_count} 首曲目的存量基准，后续将自动监控并下载新增发行的专辑与单曲。",
+                    )
+                else:
+                    base_count = self._db.batch_record_existing_base(sub_id, tracks)
+                    self._db.update_subscription_stats(sub_id, total_tracks=len(tracks))
+                    self.post_message(
+                        mtype=NotificationType.Plugin,
+                        title=f"🎵 Spotify 订阅添加成功 ({name})",
+                        text=f"已成功添加长期订阅！已建立 {base_count} 首存量基准曲目，后续将自动监控并下载新增歌曲。",
+                    )
             else:
                 # 长期全量订阅
                 sub_record = self._db.add_subscription(
@@ -980,16 +1081,29 @@ class SpotifyMusic(_PluginBase):
                     sync_mode="all",
                 )
                 sub_id = sub_record.get("id")
-                enqueued = 0
-                for t in tracks:
-                    self._queue_mgr.submit_track(t, subscription_id=sub_id, playlist_name=name)
-                    enqueued += 1
-                self._db.update_subscription_stats(sub_id, total_tracks=len(tracks))
-                self.post_message(
-                    mtype=NotificationType.Plugin,
-                    title=f"🎵 Spotify 全量订阅添加成功 ({name})",
-                    text=f"已将 {enqueued} 首曲目推入下载队列，并将该歌单加入定期巡检订阅列表。",
-                )
+                if sub_type == "artist":
+                    threading.Thread(
+                        target=self._sync_single_subscription,
+                        args=(sub_record,),
+                        daemon=True,
+                        name=f"SpotifyMusicArtistSync-{sub_id}",
+                    ).start()
+                    self.post_message(
+                        mtype=NotificationType.Plugin,
+                        title=f"🎵 Spotify 艺术家全量订阅成功 ({name})",
+                        text="已创建艺术家全量订阅，后台正自动同步下载该艺术家的全部历史唱片与曲目。",
+                    )
+                else:
+                    enqueued = 0
+                    for t in tracks:
+                        self._queue_mgr.submit_track(t, subscription_id=sub_id, playlist_name=name)
+                        enqueued += 1
+                    self._db.update_subscription_stats(sub_id, total_tracks=len(tracks))
+                    self.post_message(
+                        mtype=NotificationType.Plugin,
+                        title=f"🎵 Spotify 全量订阅添加成功 ({name})",
+                        text=f"已将 {enqueued} 首曲目推入下载队列，并将该歌单加入定期巡检订阅列表。",
+                    )
         except Exception as e:
             logger.error(f"[{self.plugin_name}] 处理 Spotify 链接失败: {e}")
             self.post_message(

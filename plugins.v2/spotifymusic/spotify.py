@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import base64
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import re
 import time
@@ -482,14 +483,33 @@ def _format_artist(
                     if art_detail.get('cover_url') and not cover_url:
                         cover_url = art_detail['cover_url']
 
-            api_tracks = get_spotify_artist_top_tracks(spotify_id, spotify_client_id, spotify_client_secret, proxy=proxy)
-            if api_tracks:
-                tracks = api_tracks
+            api_releases = get_spotify_artist_albums(
+                spotify_id,
+                spotify_client_id,
+                spotify_client_secret,
+                limit=50,
+                max_pages=20,
+                proxy=proxy,
+            )
+            if api_releases:
+                all_releases = api_releases
 
-            if not all_releases:
-                api_releases = get_spotify_artist_albums(spotify_id, spotify_client_id, spotify_client_secret, proxy=proxy)
-                if api_releases:
-                    all_releases = api_releases
+            # 并发获取艺术家全量唱片下的全部曲目（可达千首以上）
+            api_all_tracks = get_spotify_artist_all_tracks(
+                spotify_id,
+                spotify_client_id,
+                spotify_client_secret,
+                max_albums=100,
+                proxy=proxy,
+            )
+            if api_all_tracks:
+                tracks = api_all_tracks
+            elif not tracks:
+                api_tracks = get_spotify_artist_top_tracks(
+                    spotify_id, spotify_client_id, spotify_client_secret, proxy=proxy
+                )
+                if api_tracks:
+                    tracks = api_tracks
         except Exception as e:
             logger.warning(f"通过 Spotify 官方 API 补充艺术家信息异常: {e}")
 
@@ -757,17 +777,22 @@ def get_spotify_artist_all_tracks(
     spotify_id: str,
     client_id: str,
     client_secret: str,
-    max_albums: int = 50,
+    max_albums: int = 100,
     proxy: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    """调用 Spotify 官方 API 获取艺术家全部 Releases 并展开为全部曲目（可达上千首）。"""
-    releases = get_spotify_artist_albums(spotify_id, client_id, client_secret, limit=50, proxy=proxy)
-    all_tracks = []
-    seen_track_ids = set()
-    for rel in releases[:max_albums]:
+    """调用 Spotify 官方 API 并行获取艺术家全部 Releases 并展开为全部曲目（可达上千首）。"""
+    releases = get_spotify_artist_albums(
+        spotify_id, client_id, client_secret, limit=50, max_pages=20, proxy=proxy
+    )
+    if not releases:
+        return []
+
+    target_releases = releases[:max_albums]
+
+    def _fetch_tracks_for_rel(index: int, rel: Dict[str, Any]) -> Tuple[int, List[Dict[str, Any]]]:
         rel_id = rel.get("spotify_id")
         if not rel_id:
-            continue
+            return index, []
         tracks = get_spotify_album_tracks(
             album_id=rel_id,
             client_id=client_id,
@@ -777,7 +802,27 @@ def get_spotify_artist_all_tracks(
             release_date=rel.get("release_date", ""),
             proxy=proxy,
         )
-        for t in tracks:
+        return index, tracks
+
+    all_tracks_indexed: List[Tuple[int, List[Dict[str, Any]]]] = []
+    worker_count = min(10, max(1, len(target_releases)))
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        futures = [
+            executor.submit(_fetch_tracks_for_rel, idx, rel)
+            for idx, rel in enumerate(target_releases)
+        ]
+        for f in as_completed(futures):
+            try:
+                idx, t_list = f.result()
+                all_tracks_indexed.append((idx, t_list))
+            except Exception as e:
+                logger.debug(f"并发获取唱片曲目异常: {e}")
+
+    all_tracks_indexed.sort(key=lambda x: x[0])
+    all_tracks = []
+    seen_track_ids = set()
+    for _, album_tracks in all_tracks_indexed:
+        for t in album_tracks:
             tid = t.get("spotify_id")
             if tid and tid not in seen_track_ids:
                 seen_track_ids.add(tid)

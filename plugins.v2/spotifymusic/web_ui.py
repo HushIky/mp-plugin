@@ -305,10 +305,20 @@ def render_music_workbench_html(
               <span class="px-2.5 py-0.5 rounded-full text-xs font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
                 {{{{ (resolvedEntity.type || '').toUpperCase() }}}}
               </span>
-              <span class="text-xs text-slate-400">共 {{{{ (resolvedEntity.tracks || []).length }}}} 首曲目</span>
+              <span v-if="resolvedEntity.type === 'artist' && resolvedEntity.total_releases" class="text-xs text-slate-400">
+                共 {{{{ resolvedEntity.total_releases }}}} 张唱片 · {{{{ (resolvedEntity.tracks || []).length }}}} 首曲目
+              </span>
+              <span v-else class="text-xs text-slate-400">
+                共 {{{{ (resolvedEntity.tracks || []).length }}}} 首曲目
+              </span>
             </div>
             <h3 class="text-2xl font-bold text-white">{{{{ resolvedEntity.name }}}}</h3>
             <p class="text-xs text-slate-400">Spotify ID: {{{{ resolvedEntity.spotify_id }}}}</p>
+
+            <div v-if="resolvedEntity.type === 'artist' && (!resolvedEntity.total_releases || resolvedEntity.total_releases === 0)" class="p-3.5 rounded-xl bg-amber-500/10 border border-amber-500/20 text-xs text-amber-300 flex items-start gap-2 mt-2">
+              <i class="fa-solid fa-circle-info mt-0.5 text-amber-400"></i>
+              <span>提示：当前通过公开 Embed 解析出 Top 热门曲目。在插件设置中配置免费申请的 Spotify Client ID 与 Secret 后，即可解锁该艺术家的全量唱片库 (100+ 唱片 / 1,000+ 曲目) 解析与增量监控。</span>
+            </div>
 
             <!-- 操作选项按钮群 -->
             <div class="pt-4 flex flex-wrap gap-3">
@@ -342,19 +352,22 @@ def render_music_workbench_html(
 
         <!-- 曲目清单预览 -->
         <div class="border-t border-slate-700/50 pt-4">
-          <h4 class="text-sm font-semibold text-slate-300 mb-3">曲目列表预览 (前 20 首)</h4>
+          <div class="flex items-center justify-between mb-3">
+            <h4 class="text-sm font-semibold text-slate-300">曲目列表预览 (展示前 {{{{ Math.min(50, (resolvedEntity.tracks || []).length) }}}} 首)</h4>
+            <span v-if="(resolvedEntity.tracks || []).length > 50" class="text-xs text-slate-500">还有 {{{{ (resolvedEntity.tracks || []).length - 50 }}}} 首曲目未展开</span>
+          </div>
           <div class="space-y-1.5 max-h-80 overflow-y-auto pr-2">
             <div 
-              v-for="(t, i) in (resolvedEntity.tracks || []).slice(0, 20)" 
+              v-for="(t, i) in (resolvedEntity.tracks || []).slice(0, 50)" 
               :key="t.spotify_id || i"
               class="flex items-center justify-between p-2.5 rounded-xl bg-slate-800/40 text-xs text-slate-300 hover:bg-slate-800/80 transition"
             >
               <div class="flex items-center gap-3">
-                <span class="text-slate-500 font-mono w-5">{{{{ i + 1 }}}}</span>
+                <span class="text-slate-500 font-mono w-6 text-right">{{{{ i + 1 }}}}</span>
                 <span class="font-medium text-white">{{{{ t.title }}}}</span>
                 <span class="text-slate-400"> - {{{{ t.artist }}}}</span>
               </div>
-              <span class="text-slate-500">{{{{ t.album }}}}</span>
+              <span class="text-slate-500 truncate max-w-[200px] text-right">{{{{ t.album }}}}</span>
             </div>
           </div>
         </div>
