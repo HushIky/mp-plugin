@@ -746,13 +746,23 @@ class SpotifyMusic(_PluginBase):
                 self._db.update_subscription_stats(sub_id, total_tracks=len(tracks))
                 msg = f"订阅成功！已建立 {base_count} 首存量基准，后续仅同步新增曲目。"
             else:
-                # 全量同步：将现有所有曲目排入下载队列
-                enqueued = 0
-                for t in tracks:
-                    self._queue_mgr.submit_track(t, subscription_id=sub_id, playlist_name=name)
-                    enqueued += 1
-                self._db.update_subscription_stats(sub_id, total_tracks=len(tracks))
-                msg = f"订阅成功！已将全部 {enqueued} 首曲目推入下载队列。"
+                if sub_type == "artist":
+                    # 艺术家全量同步：异步触发全部 Releases 与专辑曲目下载
+                    threading.Thread(
+                        target=self._sync_single_subscription,
+                        args=(sub_record,),
+                        daemon=True,
+                        name=f"SpotifyMusicArtistSync-{sub_id}",
+                    ).start()
+                    msg = f"艺术家订阅已创建！已启动后台全量同步该艺术家全部唱片与单曲。"
+                else:
+                    # 歌单/专辑全量同步：将现有所有曲目排入下载队列
+                    enqueued = 0
+                    for t in tracks:
+                        self._queue_mgr.submit_track(t, subscription_id=sub_id, playlist_name=name)
+                        enqueued += 1
+                    self._db.update_subscription_stats(sub_id, total_tracks=len(tracks))
+                    msg = f"订阅成功！已将全部 {enqueued} 首曲目推入下载队列。"
 
             return {"success": True, "message": msg, "data": sub_record}
         except Exception as e:

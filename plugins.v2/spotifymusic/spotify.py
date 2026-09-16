@@ -596,48 +596,171 @@ def get_spotify_artist_albums(
     client_id: str,
     client_secret: str,
     limit: int = 50,
+    max_pages: int = 10,
     proxy: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    """调用 Spotify 官方 API 获取艺术家 Releases (Albums / Singles / Compilations)。"""
+    """调用 Spotify 官方 API 分页获取艺术家全量 Releases (Albums / Singles / Compilations)。"""
     token = get_spotify_access_token(client_id, client_secret, proxy=proxy)
     if not token:
         return []
     url = f"https://api.spotify.com/v1/artists/{spotify_id}/albums"
     proxies = {"http": proxy, "https": proxy} if proxy else None
+    results: List[Dict[str, Any]] = []
+    seen_ids = set()
+    offset = 0
+    page_limit = min(50, limit) if limit > 0 else 50
+    pages = 0
+
     try:
-        resp = requests.get(
-            url,
-            headers={
-                "Authorization": f"Bearer {token}",
-                "User-Agent": _USER_AGENT,
-            },
-            params={
-                "include_groups": "album,single,compilation",
-                "limit": limit,
-            },
-            proxies=proxies,
-            timeout=10,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        items = data.get("items") or []
-        results = []
-        for item in items:
-            rel_id = item.get("id")
-            if not rel_id:
-                continue
-            cover_url = _extract_image_url(item.get("images"))
-            results.append({
-                "spotify_id": rel_id,
-                "name": item.get("name", ""),
-                "type": item.get("album_type") or item.get("type", "album"),
-                "release_date": str(item.get("release_date") or ""),
-                "cover_url": cover_url,
-            })
+        while pages < max_pages:
+            resp = requests.get(
+                url,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "User-Agent": _USER_AGENT,
+                },
+                params={
+                    "include_groups": "album,single,compilation",
+                    "limit": page_limit,
+                    "offset": offset,
+                },
+                proxies=proxies,
+                timeout=10,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            items = data.get("items") or []
+            if not items:
+                break
+            for item in items:
+                rel_id = item.get("id")
+                if not rel_id or rel_id in seen_ids:
+                    continue
+                seen_ids.add(rel_id)
+                cover_url = _extract_image_url(item.get("images"))
+                results.append({
+                    "spotify_id": rel_id,
+                    "name": item.get("name", ""),
+                    "type": item.get("album_type") or item.get("type", "album"),
+                    "release_date": str(item.get("release_date") or ""),
+                    "cover_url": cover_url,
+                    "total_tracks": item.get("total_tracks") or 0,
+                })
+            offset += len(items)
+            total = data.get("total") or 0
+            pages += 1
+            if offset >= total or len(items) < page_limit:
+                break
         return results
     except Exception as e:
         logger.warning(f"Spotify 官方获取艺术家 Releases 异常: {e}")
+        return results
+
+
+def get_spotify_album_tracks(
+    album_id: str,
+    client_id: str,
+    client_secret: str,
+    album_name: str = "",
+    album_cover: str = "",
+    release_date: str = "",
+    proxy: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """调用 Spotify 官方 API 获取专辑全部曲目。"""
+    token = get_spotify_access_token(client_id, client_secret, proxy=proxy)
+    if not token:
         return []
+    url = f"https://api.spotify.com/v1/albums/{album_id}/tracks"
+    proxies = {"http": proxy, "https": proxy} if proxy else None
+    results = []
+    offset = 0
+    limit = 50
+    try:
+        while True:
+            resp = requests.get(
+                url,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "User-Agent": _USER_AGENT,
+                },
+                params={"limit": limit, "offset": offset},
+                proxies=proxies,
+                timeout=10,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            items = data.get("items") or []
+            if not items:
+                break
+            for idx, item in enumerate(items, offset + 1):
+                t_id = item.get("id")
+                if not t_id:
+                    continue
+                artists_list = [
+                    a.get("name", "")
+                    for a in (item.get("artists") or [])
+                    if isinstance(a, dict) and a.get("name")
+                ]
+                artist_str = ", ".join(artists_list) if artists_list else "未知艺术家"
+                dur_ms = item.get("duration_ms") or 0
+                dur_sec = dur_ms // 1000
+                results.append({
+                    "type": "track",
+                    "spotify_id": t_id,
+                    "title": item.get("name"),
+                    "artists": artists_list,
+                    "artist": artist_str,
+                    "album_artists": artists_list,
+                    "album_artist": artist_str,
+                    "album": album_name,
+                    "cover_url": album_cover,
+                    "duration": dur_sec,
+                    "track_number": item.get("track_number") or idx,
+                    "disc_number": item.get("disc_number") or 1,
+                    "total_tracks": data.get("total") or len(items),
+                    "release_date": release_date,
+                    "url": f"https://open.spotify.com/track/{t_id}",
+                })
+            offset += len(items)
+            total = data.get("total") or 0
+            if offset >= total or len(items) < limit:
+                break
+        return results
+    except Exception as e:
+        logger.warning(f"Spotify 官方获取专辑 {album_id} 曲目异常: {e}")
+        return results
+
+
+def get_spotify_artist_all_tracks(
+    spotify_id: str,
+    client_id: str,
+    client_secret: str,
+    max_albums: int = 50,
+    proxy: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """调用 Spotify 官方 API 获取艺术家全部 Releases 并展开为全部曲目（可达上千首）。"""
+    releases = get_spotify_artist_albums(spotify_id, client_id, client_secret, limit=50, proxy=proxy)
+    all_tracks = []
+    seen_track_ids = set()
+    for rel in releases[:max_albums]:
+        rel_id = rel.get("spotify_id")
+        if not rel_id:
+            continue
+        tracks = get_spotify_album_tracks(
+            album_id=rel_id,
+            client_id=client_id,
+            client_secret=client_secret,
+            album_name=rel.get("name", ""),
+            album_cover=rel.get("cover_url", ""),
+            release_date=rel.get("release_date", ""),
+            proxy=proxy,
+        )
+        for t in tracks:
+            tid = t.get("spotify_id")
+            if tid and tid not in seen_track_ids:
+                seen_track_ids.add(tid)
+                all_tracks.append(t)
+    return all_tracks
 
 
 _spotify_token: Optional[str] = None
