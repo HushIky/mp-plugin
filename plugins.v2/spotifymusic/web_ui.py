@@ -62,7 +62,7 @@ def render_music_workbench_html(
         <div>
           <h1 class="text-xl font-bold tracking-tight text-white flex items-center gap-2">
             Spotify 音乐搜索与订阅工作台
-            <span class="text-xs font-normal px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">v1.1.12</span>
+            <span class="text-xs font-normal px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">v1.1.13</span>
           </h1>
           <p class="text-xs text-slate-400">高品质音频下载 • 元数据/歌词/封面打标 • 增量订阅管理</p>
         </div>
@@ -776,6 +776,16 @@ def render_music_workbench_html(
             重试失败 ({{{{ failedTaskCount }}}})
           </button>
           <button 
+            v-if="failedTaskCount > 0"
+            @click="clearFailedTasks" 
+            :disabled="clearingFailed"
+            class="px-3 py-2 rounded-xl bg-slate-800 hover:bg-rose-950/80 border border-slate-700 hover:border-rose-800 text-xs text-slate-300 hover:text-rose-300 transition flex items-center gap-1.5"
+            title="清理所有失败任务记录"
+          >
+            <i class="fa-solid fa-trash-can"></i>
+            清理失败
+          </button>
+          <button 
             v-if="completedTaskCount > 0"
             @click="clearCompletedTasks" 
             :disabled="clearingCompleted"
@@ -816,8 +826,8 @@ def render_music_workbench_html(
             </div>
           </div>
 
-          <!-- 进度与状态 -->
-          <div class="flex items-center gap-4 md:w-80 justify-between md:justify-end">
+          <!-- 进度与操作 -->
+          <div class="flex items-center gap-3 md:w-96 justify-between md:justify-end">
             <div class="flex-1 max-w-[180px]">
               <div class="flex items-center justify-between text-[11px] mb-1">
                 <span class="text-slate-400">{{{{ getStatusText(task.status) }}}}</span>
@@ -834,11 +844,36 @@ def render_music_workbench_html(
             </div>
 
             <span 
-              class="px-2.5 py-1 rounded-lg text-xs font-semibold"
+              class="px-2.5 py-1 rounded-lg text-xs font-semibold flex-shrink-0"
               :class="getStatusBadgeClass(task.status)"
             >
               {{{{ task.status.toUpperCase() }}}}
             </span>
+
+            <div class="flex items-center gap-1.5 flex-shrink-0">
+              <button 
+                v-if="task.status === 'failed'"
+                @click="retryTask(task)"
+                :disabled="retryingTaskMap[task.id]"
+                class="px-2 py-1 rounded-lg bg-rose-950/40 hover:bg-rose-900/60 text-rose-300 hover:text-white border border-rose-800/60 transition text-[11px] flex items-center gap-1"
+                title="重新重试此失败任务"
+              >
+                <i class="fa-solid fa-rotate-left" :class="{{ 'fa-spin': retryingTaskMap[task.id] }}"></i>
+                <span>重试</span>
+              </button>
+
+              <button 
+                @click="deleteTask(task)"
+                :disabled="deletingTaskMap[task.id]"
+                class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-rose-950/60 text-slate-400 hover:text-rose-300 border border-slate-700 hover:border-rose-900/60 transition text-[11px] flex items-center gap-1"
+                :title="['downloading', 'pending', 'matching', 'processing', 'tagging'].includes(task.status) ? '取消并删除此下载任务' : '删除此任务记录'"
+              >
+                <i v-if="deletingTaskMap[task.id]" class="fa-solid fa-spinner fa-spin"></i>
+                <i v-else-if="['downloading', 'pending', 'matching', 'processing', 'tagging'].includes(task.status)" class="fa-solid fa-ban"></i>
+                <i v-else class="fa-solid fa-trash-can"></i>
+                <span>{{{{ ['downloading', 'pending', 'matching', 'processing', 'tagging'].includes(task.status) ? '取消' : '删除' }}}}</span>
+              </button>
+            </div>
           </div>
         </div>
       </div>
@@ -1296,7 +1331,10 @@ def render_music_workbench_html(
         const tasks = ref([]);
         const refreshingTasks = ref(false);
         const clearingCompleted = ref(false);
+        const clearingFailed = ref(false);
         const retryingFailed = ref(false);
+        const deletingTaskMap = ref({{}});
+        const retryingTaskMap = ref({{}});
 
         const activeTaskCount = computed(() => {{
           return tasks.value.filter(t => t.status === 'pending' || t.status === 'downloading' || t.status === 'tagging' || t.status === 'matching' || t.status === 'processing').length;
@@ -1335,6 +1373,20 @@ def render_music_workbench_html(
           }}
         }};
 
+        const clearFailedTasks = async () => {{
+          if (!confirm('确定要清理所有失败的任务记录吗？')) return;
+          clearingFailed.value = true;
+          try {{
+            const res = await request('/tasks/clear_failed', {{ method: 'POST' }});
+            showToast(res.message || '已清理所有失败任务');
+            fetchTasks();
+          }} catch (e) {{
+            showToast('清理失败: ' + e.message, 'error');
+          }} finally {{
+            clearingFailed.value = false;
+          }}
+        }};
+
         const retryFailedTasks = async () => {{
           retryingFailed.value = true;
           try {{
@@ -1345,6 +1397,39 @@ def render_music_workbench_html(
             showToast('重试失败: ' + e.message, 'error');
           }} finally {{
             retryingFailed.value = false;
+          }}
+        }};
+
+        const deleteTask = async (task) => {{
+          if (!task || !task.id) return;
+          const isPendingOrRunning = ['downloading', 'pending', 'matching', 'processing', 'tagging'].includes(task.status);
+          const actionText = isPendingOrRunning ? '取消' : '删除';
+          if (!confirm(`确定要${{actionText}}任务【${{task.artist || ''}} - ${{task.title || ''}}】吗？`)) {{
+            return;
+          }}
+          deletingTaskMap.value[task.id] = true;
+          try {{
+            await request(`/tasks/${{task.id}}`, {{ method: 'DELETE' }});
+            showToast(`任务【${{task.title}}】已成功${{actionText}}！`);
+            fetchTasks();
+          }} catch (e) {{
+            showToast(`${{actionText}}任务失败: ` + e.message, 'error');
+          }} finally {{
+            deletingTaskMap.value[task.id] = false;
+          }}
+        }};
+
+        const retryTask = async (task) => {{
+          if (!task || !task.id) return;
+          retryingTaskMap.value[task.id] = true;
+          try {{
+            const res = await request(`/tasks/${{task.id}}/retry`, {{ method: 'POST' }});
+            showToast(res.message || `已重新排队任务【${{task.title}}】`);
+            fetchTasks();
+          }} catch (e) {{
+            showToast('重试任务失败: ' + e.message, 'error');
+          }} finally {{
+            retryingTaskMap.value[task.id] = false;
           }}
         }};
 
@@ -1466,13 +1551,19 @@ def render_music_workbench_html(
           tasks,
           refreshingTasks,
           clearingCompleted,
+          clearingFailed,
           retryingFailed,
+          deletingTaskMap,
+          retryingTaskMap,
           activeTaskCount,
           completedTaskCount,
           failedTaskCount,
           fetchTasks,
           clearCompletedTasks,
+          clearFailedTasks,
           retryFailedTasks,
+          deleteTask,
+          retryTask,
           getStatusText,
           getStatusBadgeClass,
           subscriptions,

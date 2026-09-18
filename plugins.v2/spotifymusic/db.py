@@ -210,16 +210,19 @@ class MusicDatabase:
         status: str = 'downloaded',
         file_path: Optional[str] = None,
     ) -> None:
-        """记录曲目到订阅历史（用于去重）。"""
-        with self._lock, self._connect() as conn:
-            conn.execute(
-                """
-                INSERT OR REPLACE INTO subscription_history
-                (subscription_id, track_spotify_id, track_name, artist_name, album_name, status, downloaded_at, file_path)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (sub_id, track_spotify_id, track_name, artist_name, album_name, status, _now_iso(), file_path),
-            )
+        """记录曲目到订阅历史（用于去重）。若订阅已被删除则忽略外键冲突。"""
+        try:
+            with self._lock, self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO subscription_history
+                    (subscription_id, track_spotify_id, track_name, artist_name, album_name, status, downloaded_at, file_path)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (sub_id, track_spotify_id, track_name, artist_name, album_name, status, _now_iso(), file_path),
+                )
+        except sqlite3.Error as e:
+            logger.debug(f"记录订阅历史忽略外键或数据库约束冲突 (sub_id={sub_id}): {e}")
 
     def batch_record_existing_base(
         self,
@@ -346,6 +349,12 @@ class MusicDatabase:
         """清理所有已完成的任务。"""
         with self._lock, self._connect() as conn:
             cur = conn.execute("DELETE FROM download_tasks WHERE status = 'completed'")
+            return cur.rowcount
+
+    def clear_failed_tasks(self) -> int:
+        """清理所有失败的任务。"""
+        with self._lock, self._connect() as conn:
+            cur = conn.execute("DELETE FROM download_tasks WHERE status = 'failed'")
             return cur.rowcount
 
     def retry_failed_tasks(self) -> List[str]:

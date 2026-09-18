@@ -61,6 +61,8 @@ class DownloadQueueManager:
         self._workers: list[threading.Thread] = []
         self._stop_event = threading.Event()
         self._running = False
+        self._lock = threading.Lock()
+        self._cancelled_tasks: set[str] = set()
         self._downloader = self._build_downloader()
 
     def _build_downloader(self) -> MusicDownloader:
@@ -165,6 +167,35 @@ class DownloadQueueManager:
         self._queue.put(job)
         return task_id
 
+    def cancel_task(self, task_id: str) -> bool:
+        """取消下载队列中的任务并从数据库删除。"""
+        with self._lock:
+            self._cancelled_tasks.add(task_id)
+        return self.db.delete_task(task_id)
+
+    def requeue_task(self, task_id: str) -> bool:
+        """重新将现有数据库中的任务排入执行队列（避免重复生成记录）。"""
+        task = self.db.get_task(task_id)
+        if not task:
+            return False
+        with self._lock:
+            self._cancelled_tasks.discard(task_id)
+        self.db.update_task_progress(task_id, status="pending", progress=0.0, speed="", error_msg="")
+        track_info = {
+            "title": task.get("title"),
+            "artist": task.get("artist"),
+            "album": task.get("album"),
+            "cover_url": task.get("cover_url"),
+            "spotify_id": task.get("spotify_id"),
+        }
+        job = DownloadJob(
+            task_id=task_id,
+            track_info=track_info,
+            subscription_id=task.get("subscription_id"),
+        )
+        self._queue.put(job)
+        return True
+
     def _worker_loop(self, worker_id: int) -> None:
         """消费者循环。"""
         while self._running and not self._stop_event.is_set():
@@ -177,7 +208,30 @@ class DownloadQueueManager:
                 if job is None:
                     break
 
+                with self._lock:
+                    if job.task_id in self._cancelled_tasks:
+                        self._cancelled_tasks.discard(job.task_id)
+                        self._queue.task_done()
+                        continue
+
+                # 检查数据库中任务是否已被删除
+                task = self.db.get_task(job.task_id)
+                if not task:
+                    self._queue.task_done()
+                    continue
+
                 with self._semaphore:
+                    # 再次校验是否在等待信号量期间被取消
+                    with self._lock:
+                        if job.task_id in self._cancelled_tasks:
+                            self._cancelled_tasks.discard(job.task_id)
+                            self._queue.task_done()
+                            continue
+                    task = self.db.get_task(job.task_id)
+                    if not task:
+                        self._queue.task_done()
+                        continue
+
                     self._process_job(job)
 
                 self._queue.task_done()
@@ -222,18 +276,21 @@ class DownloadQueueManager:
                 file_path=str(final_audio),
             )
 
-            # 如果归属于订阅，记录历史去重与统计
+            # 如果归属于订阅，安全记录历史去重与统计
             if job.subscription_id and track.get("spotify_id"):
-                self.db.record_track_history(
-                    sub_id=job.subscription_id,
-                    track_spotify_id=track["spotify_id"],
-                    track_name=title,
-                    artist_name=artist,
-                    album_name=track.get("album", ""),
-                    status="downloaded",
-                    file_path=str(final_audio),
-                )
-                self.db.update_subscription_stats(job.subscription_id, downloaded_increment=1)
+                try:
+                    self.db.record_track_history(
+                        sub_id=job.subscription_id,
+                        track_spotify_id=track["spotify_id"],
+                        track_name=title,
+                        artist_name=artist,
+                        album_name=track.get("album", ""),
+                        status="downloaded",
+                        file_path=str(final_audio),
+                    )
+                    self.db.update_subscription_stats(job.subscription_id, downloaded_increment=1)
+                except Exception as ex:
+                    logger.debug(f"记录订阅历史与更新统计异常: {ex}")
 
             # 触发完成回调 (如系统通知或媒体库刷新)
             if self.on_task_completed:

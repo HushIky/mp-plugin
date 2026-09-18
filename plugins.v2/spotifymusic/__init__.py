@@ -37,7 +37,7 @@ class SpotifyMusic(_PluginBase):
     plugin_name = "Spotify音乐下载与订阅"
     plugin_desc = "支持 Spotify 链接解析、音乐搜索、歌单/艺术家增量订阅、元数据标签/封面/歌词内嵌与目录自动整理。"
     plugin_icon = "spotifymusic.png"
-    plugin_version = "1.1.12"
+    plugin_version = "1.1.13"
     plugin_label = "音乐管理"
     plugin_author = "local"
     plugin_order = 10
@@ -658,12 +658,44 @@ class SpotifyMusic(_PluginBase):
                 "description": "清空所有状态为 completed 的任务记录",
             },
             {
+                "path": "/tasks/clear_failed",
+                "endpoint": self.api_clear_failed_tasks,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "清理所有失败任务",
+                "description": "清空所有状态为 failed 的任务记录",
+            },
+            {
                 "path": "/tasks/retry_failed",
                 "endpoint": self.api_retry_failed_tasks,
                 "methods": ["POST"],
                 "auth": "bear",
-                "summary": "重试失败任务",
+                "summary": "重试全部失败任务",
                 "description": "重置所有失败任务并重新排队",
+            },
+            {
+                "path": "/tasks/{task_id}",
+                "endpoint": self.api_delete_task,
+                "methods": ["DELETE"],
+                "auth": "bear",
+                "summary": "删除或取消单个任务",
+                "description": "从队列或数据库中删除/取消指定的下载任务",
+            },
+            {
+                "path": "/tasks/{task_id}/delete",
+                "endpoint": self.api_delete_task,
+                "methods": ["POST", "DELETE"],
+                "auth": "bear",
+                "summary": "删除或取消单个任务（别名）",
+                "description": "从队列或数据库中删除/取消指定的下载任务",
+            },
+            {
+                "path": "/tasks/{task_id}/retry",
+                "endpoint": self.api_retry_task,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "重试单个任务",
+                "description": "重新排队执行指定的失败任务",
             },
         ]
 
@@ -918,25 +950,49 @@ class SpotifyMusic(_PluginBase):
         count = self._db.clear_completed_tasks()
         return {"success": True, "message": f"已清理 {count} 条已完成任务"}
 
-    def api_retry_failed_tasks(self) -> Dict[str, Any]:
-        """重试失败任务。"""
+    def api_clear_failed_tasks(self) -> Dict[str, Any]:
+        """清理失败任务。"""
+        if not self._db:
+            return {"success": False, "message": "插件尚未初始化"}
+        count = self._db.clear_failed_tasks()
+        return {"success": True, "message": f"已清理 {count} 条失败任务"}
+
+    def api_delete_task(self, task_id: str) -> Dict[str, Any]:
+        """删除或取消指定任务。"""
+        if not self._db:
+            return {"success": False, "message": "插件尚未初始化"}
+        task = self._db.get_task(task_id)
+        if not task:
+            return {"success": False, "message": "任务不存在"}
+        if self._queue_mgr:
+            self._queue_mgr.cancel_task(task_id)
+        else:
+            self._db.delete_task(task_id)
+        return {"success": True, "message": f"任务《{task.get('title', task_id)}》已成功取消并删除"}
+
+    def api_retry_task(self, task_id: str) -> Dict[str, Any]:
+        """重试单个失败任务。"""
         if not self._db or not self._queue_mgr:
             return {"success": False, "message": "插件尚未初始化"}
-        failed_ids = self._db.retry_failed_tasks()
-        for fid in failed_ids:
-            task = self._db.get_task(fid)
-            if task:
-                self._queue_mgr.submit_track(
-                    {
-                        "title": task["title"],
-                        "artist": task["artist"],
-                        "album": task["album"],
-                        "cover_url": task["cover_url"],
-                        "spotify_id": task["spotify_id"],
-                    },
-                    subscription_id=task.get("subscription_id"),
-                )
-        return {"success": True, "message": f"已重试 {len(failed_ids)} 个失败任务"}
+        task = self._db.get_task(task_id)
+        if not task:
+            return {"success": False, "message": "任务不存在"}
+        ok = self._queue_mgr.requeue_task(task_id)
+        if ok:
+            return {"success": True, "message": f"已将任务《{task.get('title', task_id)}》重新排入下载队列"}
+        return {"success": False, "message": "重新排队任务失败"}
+
+    def api_retry_failed_tasks(self) -> Dict[str, Any]:
+        """重试全部失败任务。"""
+        if not self._db or not self._queue_mgr:
+            return {"success": False, "message": "插件尚未初始化"}
+        failed_tasks = self._db.list_tasks(status="failed", limit=100)
+        requeued_count = 0
+        for task in failed_tasks:
+            fid = task.get("id")
+            if fid and self._queue_mgr.requeue_task(fid):
+                requeued_count += 1
+        return {"success": True, "message": f"已重新排队 {requeued_count} 个失败任务"}
 
     # ==================== 后台调度与同步逻辑 ====================
 
