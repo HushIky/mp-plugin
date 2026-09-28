@@ -136,7 +136,7 @@ class EpisodeFallback(_PluginBase):
     plugin_name = "TMDB待定集数订阅兜底"
     plugin_desc = "解决 TMDB 尚未录入剧集集数导致无法添加订阅的问题。当 TMDB 总集数未录入或为 0 时，自动提供可配置的默认兜底集数（默认 1 集），并支持开启媒体库搜索包含成人内容 (18+)。"
     plugin_icon = "episodefallback.png"
-    plugin_version = "1.1.0"
+    plugin_version = "1.1.1"
     plugin_label = "订阅管理"
     plugin_author = "local"
     plugin_order = 20
@@ -161,6 +161,7 @@ class EpisodeFallback(_PluginBase):
         self._notify = True
         self._custom_rules_text = ""
         self._custom_rules = []
+        self._history = []
 
         if not config:
             return
@@ -239,6 +240,7 @@ class EpisodeFallback(_PluginBase):
 
     def _load_history(self) -> None:
         """从本地磁盘读取历史兜底记录。"""
+        self._history = []
         try:
             h_file = self._get_history_file()
             if h_file.exists():
@@ -291,38 +293,48 @@ class EpisodeFallback(_PluginBase):
             + ("（匹配自定义规则）" if matched_episodes else "（默认配置）")
         )
 
-        # 记录到历史列表
-        record = {
-            "title": title,
-            "season": season,
-            "episodes": target_episodes,
-            "tmdb_id": str(tmdb_id) if tmdb_id else "",
-            "time": _now_str(),
-            "scene": event_data.scene or "create",
-            "matched_rule": bool(matched_episodes),
-        }
-        self._history.append(record)
-        if len(self._history) > self._max_history:
-            self._history = self._history[-self._max_history:]
-        self._save_history()
+        # 仅在创建订阅场景（scene == "create" 或默认首次阶段）记录历史并发送通知，
+        # 避免后台定时巡检（scene == "precheck"）或订阅刷新（scene == "refresh"）时重复发送通知骚扰用户与历史刷屏
+        is_create_scene = event_data.scene in ("create", None)
 
-        logger.info(
-            f"[{self.plugin_name}] 已成功为《{title}》第 {season} 季注入兜底总集数: {target_episodes} 集"
-            f" (触发场景: {event_data.scene})"
-        )
+        if is_create_scene:
+            # 记录到历史列表
+            record = {
+                "title": title,
+                "season": season,
+                "episodes": target_episodes,
+                "tmdb_id": str(tmdb_id) if tmdb_id else "",
+                "time": _now_str(),
+                "scene": event_data.scene or "create",
+                "matched_rule": bool(matched_episodes),
+            }
+            self._history.append(record)
+            if len(self._history) > self._max_history:
+                self._history = self._history[-self._max_history:]
+            self._save_history()
 
-        # 发送系统通知
-        if self._notify:
-            self.post_message(
-                mtype=NotificationType.Plugin,
-                title=f"📺 TMDB 待定集数自动兜底: {title}",
-                text=(
-                    f"剧集: {title}\n"
-                    f"季号: 第 {season} 季\n"
-                    f"设定总集数: {target_episodes} 集\n"
-                    f"原因: TMDB 尚未录入该季分集信息，已自动填入兜底集数以保证订阅成功创建。\n"
-                    f"💡 提示: 后续 TMDB 补充真实集数后，系统定时巡检会自动同步更新。"
-                ),
+            logger.info(
+                f"[{self.plugin_name}] 已成功为《{title}》第 {season} 季注入兜底总集数: {target_episodes} 集"
+                f" (触发场景: {event_data.scene})"
+            )
+
+            # 发送系统通知
+            if self._notify:
+                self.post_message(
+                    mtype=NotificationType.Plugin,
+                    title=f"📺 TMDB 待定集数自动兜底: {title}",
+                    text=(
+                        f"剧集: {title}\n"
+                        f"季号: 第 {season} 季\n"
+                        f"设定总集数: {target_episodes} 集\n"
+                        f"原因: TMDB 尚未录入该季分集信息，已自动填入兜底集数以保证订阅成功创建。\n"
+                        f"💡 提示: 后续 TMDB 补充真实集数后，系统定时巡检会自动同步更新。"
+                    ),
+                )
+        else:
+            logger.debug(
+                f"[{self.plugin_name}] 后台巡检为《{title}》第 {season} 季静默维持兜底总集数: {target_episodes} 集"
+                f" (触发场景: {event_data.scene})"
             )
 
     def get_form(self) -> Tuple[Optional[List[dict]], Dict[str, Any]]:
