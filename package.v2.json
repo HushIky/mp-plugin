@@ -1,4 +1,17 @@
 {
+  "EpisodeFallback": {
+    "name": "TMDB待定集数订阅兜底",
+    "description": "解决 TMDB 尚未录入剧集集数导致无法添加订阅的问题。当 TMDB 总集数未录入或为 0 时，自动提供可配置的默认兜底集数（默认 1 集），解除订阅创建拦截。",
+    "labels": "订阅管理",
+    "version": "1.0.0",
+    "icon": "episodefallback.png",
+    "author": "local",
+    "level": 1,
+    "system_version": ">=2.12.0",
+    "history": {
+      "v1.0.0": "初始版本：支持 TMDB 缺失集数时自动注入默认兜底集数（默认 1 集），支持自定义剧名/TMDB ID 匹配规则与兜底历史记录"
+    }
+  },
   "SiteSpeedLimit": {
     "name": "站点限速与分享率控制",
     "description": "添加下载任务时，根据种子所属站点自动设置最大上传速度、最大分享率及做种时间限制。",
