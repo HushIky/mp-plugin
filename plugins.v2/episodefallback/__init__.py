@@ -1,13 +1,16 @@
-"""TMDB 待定集数订阅兜底插件。
+"""TMDB 待定集数订阅兜底与搜索增强插件。
 
 解决 TMDB 尚未录入剧集集数导致无法添加订阅的问题。
 当 TMDB 总集数未录入或为 0 时，自动提供可配置的默认兜底集数（默认 1 集），并支持自定义规则与记录。
+同时支持开启 TMDB 媒体库搜索包含成人内容 (18+)，且完全不影响日常自动化入库与刮削匹配识别。
 """
 
 from __future__ import annotations
 
+import functools
 import json
 import re
+from contextvars import ContextVar
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -24,14 +27,116 @@ def _now_str() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
+# 标记当前执行上下文是否处于“用户主动媒体搜索”期间
+_in_media_search: ContextVar[bool] = ContextVar("episodefallback_in_media_search", default=False)
+
+# 保存原始方法引用以便在插件停用或开关关闭时无残留恢复
+_ORIG_METHODS: Dict[str, Any] = {}
+_HOOKED: bool = False
+
+
+def _apply_tmdb_adult_hooks() -> None:
+    """对 TMDB 搜索施加切面包装，在 search_medias 期间注入 include_adult=true。"""
+    global _HOOKED, _ORIG_METHODS
+    if _HOOKED:
+        return
+
+    try:
+        from app.modules.themoviedb import TheMovieDbModule
+        from app.modules.themoviedb.tmdbapi import TmdbApi
+        from app.modules.themoviedb.tmdbv3api.objs.search import Search
+
+        # 1. 包装 TheMovieDbModule.search_medias 与 async_search_medias，标记搜索上下文
+        _ORIG_METHODS["TheMovieDbModule.search_medias"] = TheMovieDbModule.search_medias
+        _ORIG_METHODS["TheMovieDbModule.async_search_medias"] = TheMovieDbModule.async_search_medias
+
+        @functools.wraps(_ORIG_METHODS["TheMovieDbModule.search_medias"])
+        def patched_search_medias(self, meta, media_source=None):
+            token = _in_media_search.set(True)
+            try:
+                return _ORIG_METHODS["TheMovieDbModule.search_medias"](self, meta, media_source)
+            finally:
+                _in_media_search.reset(token)
+
+        @functools.wraps(_ORIG_METHODS["TheMovieDbModule.async_search_medias"])
+        async def patched_async_search_medias(self, meta, media_source=None):
+            token = _in_media_search.set(True)
+            try:
+                return await _ORIG_METHODS["TheMovieDbModule.async_search_medias"](self, meta, media_source)
+            finally:
+                _in_media_search.reset(token)
+
+        TheMovieDbModule.search_medias = patched_search_medias
+        TheMovieDbModule.async_search_medias = patched_async_search_medias
+
+        # 2. 包装 Search 对象的底层请求方法，仅在搜索上下文中注入 adult=True
+        for m_name in ("movies", "tv_shows", "multi", "async_movies", "async_tv_shows", "async_multi"):
+            if hasattr(Search, m_name):
+                orig_func = getattr(Search, m_name)
+                _ORIG_METHODS[f"Search.{m_name}"] = orig_func
+
+                if m_name.startswith("async_"):
+                    def make_async_wrapper(orig_f):
+                        @functools.wraps(orig_f)
+                        async def async_wrapper(self, term, adult=None, *args, **kwargs):
+                            if adult is None and _in_media_search.get():
+                                adult = True
+                            return await orig_f(self, term, adult=adult, *args, **kwargs)
+                        return async_wrapper
+
+                    setattr(Search, m_name, make_async_wrapper(orig_func))
+                else:
+                    def make_sync_wrapper(orig_f):
+                        @functools.wraps(orig_f)
+                        def sync_wrapper(self, term, adult=None, *args, **kwargs):
+                            if adult is None and _in_media_search.get():
+                                adult = True
+                            return orig_f(self, term, adult=adult, *args, **kwargs)
+                        return sync_wrapper
+
+                    setattr(Search, m_name, make_sync_wrapper(orig_func))
+
+        _HOOKED = True
+        logger.info("[TMDB待定集数订阅兜底] 已成功启用 TMDB 成人内容(18+)搜索增强")
+    except Exception as e:
+        logger.error(f"[TMDB待定集数订阅兜底] 启用 TMDB 成人搜索增强失败: {e}")
+
+
+def _restore_tmdb_adult_hooks() -> None:
+    """恢复原始 TMDB 方法，解除切面拦截。"""
+    global _HOOKED, _ORIG_METHODS
+    if not _HOOKED:
+        return
+
+    try:
+        from app.modules.themoviedb import TheMovieDbModule
+        from app.modules.themoviedb.tmdbv3api.objs.search import Search
+
+        if "TheMovieDbModule.search_medias" in _ORIG_METHODS:
+            TheMovieDbModule.search_medias = _ORIG_METHODS["TheMovieDbModule.search_medias"]
+        if "TheMovieDbModule.async_search_medias" in _ORIG_METHODS:
+            TheMovieDbModule.async_search_medias = _ORIG_METHODS["TheMovieDbModule.async_search_medias"]
+
+        for m_name in ("movies", "tv_shows", "multi", "async_movies", "async_tv_shows", "async_multi"):
+            key = f"Search.{m_name}"
+            if key in _ORIG_METHODS and hasattr(Search, m_name):
+                setattr(Search, m_name, _ORIG_METHODS[key])
+
+        _ORIG_METHODS.clear()
+        _HOOKED = False
+        logger.info("[TMDB待定集数订阅兜底] 已恢复原始 TMDB 搜索配置")
+    except Exception as e:
+        logger.error(f"[TMDB待定集数订阅兜底] 恢复原始 TMDB 搜索配置异常: {e}")
+
+
 class EpisodeFallback(_PluginBase):
-    """TMDB 待定集数订阅兜底插件主类。"""
+    """TMDB 待定集数订阅兜底与搜索增强插件主类。"""
 
     # 插件元信息
     plugin_name = "TMDB待定集数订阅兜底"
-    plugin_desc = "解决 TMDB 尚未录入剧集集数导致无法添加订阅的问题。当 TMDB 总集数未录入或为 0 时，自动提供可配置的默认兜底集数（默认 1 集），解除订阅创建拦截。"
+    plugin_desc = "解决 TMDB 尚未录入剧集集数导致无法添加订阅的问题。当 TMDB 总集数未录入或为 0 时，自动提供可配置的默认兜底集数（默认 1 集），并支持开启媒体库搜索包含成人内容 (18+)。"
     plugin_icon = "episodefallback.png"
-    plugin_version = "1.0.0"
+    plugin_version = "1.1.0"
     plugin_label = "订阅管理"
     plugin_author = "local"
     plugin_order = 20
@@ -40,6 +145,7 @@ class EpisodeFallback(_PluginBase):
     # 内部运行状态
     _enabled: bool = False
     _default_episodes: int = 1
+    _include_adult_search: bool = False
     _notify: bool = True
     _custom_rules_text: str = ""
     _custom_rules: List[Dict[str, Any]] = []
@@ -51,6 +157,7 @@ class EpisodeFallback(_PluginBase):
         self.stop_service()
         self._enabled = False
         self._default_episodes = 1
+        self._include_adult_search = False
         self._notify = True
         self._custom_rules_text = ""
         self._custom_rules = []
@@ -63,6 +170,7 @@ class EpisodeFallback(_PluginBase):
             self._default_episodes = max(1, int(config.get("default_episodes") or 1))
         except (ValueError, TypeError):
             self._default_episodes = 1
+        self._include_adult_search = bool(config.get("include_adult_search", False))
         self._notify = bool(config.get("notify", True))
         self._custom_rules_text = str(config.get("custom_rules") or "").strip()
         self._custom_rules = self._parse_custom_rules(self._custom_rules_text)
@@ -70,9 +178,16 @@ class EpisodeFallback(_PluginBase):
         # 加载历史记录
         self._load_history()
 
+        # 根据配置决定是否开启成人内容搜索增强
+        if self._enabled and self._include_adult_search:
+            _apply_tmdb_adult_hooks()
+        else:
+            _restore_tmdb_adult_hooks()
+
         logger.info(
             f"[{self.plugin_name}] 初始化完成：启用={self._enabled}，"
-            f"默认兜底集数={self._default_episodes}，自定义规则数={len(self._custom_rules)}"
+            f"默认兜底集数={self._default_episodes}，成人搜索={self._include_adult_search}，"
+            f"自定义规则数={len(self._custom_rules)}"
         )
 
     def get_state(self) -> bool:
@@ -221,17 +336,32 @@ class EpisodeFallback(_PluginBase):
                         "content": [
                             {
                                 "component": "VCol",
-                                "props": {"cols": 12},
+                                "props": {"cols": 12, "md": 6},
                                 "content": [
                                     {
                                         "component": "VSwitch",
                                         "props": {
                                             "model": "enabled",
-                                            "label": "启用 TMDB 待定集数兜底插件",
+                                            "label": "启用 TMDB 待定集数兜底",
                                         },
                                     }
                                 ],
-                            }
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {
+                                        "component": "VSwitch",
+                                        "props": {
+                                            "model": "include_adult_search",
+                                            "label": "TMDB 搜索包含成人内容 (18+)",
+                                            "hint": "开启后在搜索媒体时允许 TMDB 返回成人内容，完全不影响后台自动识别匹配",
+                                            "persistentHint": True,
+                                        },
+                                    }
+                                ],
+                            },
                         ],
                     },
                     {
@@ -297,6 +427,7 @@ class EpisodeFallback(_PluginBase):
         default_config = {
             "enabled": False,
             "default_episodes": 1,
+            "include_adult_search": False,
             "notify": True,
             "custom_rules": "",
         }
@@ -332,6 +463,8 @@ class EpisodeFallback(_PluginBase):
             else "暂无兜底记录。当添加 TMDB 缺失集数的剧集时将自动记录在此。"
         )
 
+        adult_search_status = "🟢 已开启 (支持 18+ 影视检索)" if self._include_adult_search else "⚪ 未开启 (仅常规内容)"
+
         return [
             {
                 "component": "VCard",
@@ -339,15 +472,16 @@ class EpisodeFallback(_PluginBase):
                 "content": [
                     {
                         "component": "VCardTitle",
-                        "text": "🛡️ TMDB 待定集数兜底已就绪",
+                        "text": "🛡️ TMDB 增强服务运行中",
                     },
                     {
                         "component": "VCardText",
                         "text": (
-                            f"【运行状态】正常运行中 | 全局默认兜底集数: {self._default_episodes} 集 | "
-                            f"自定义规则数: {len(self._custom_rules)} 条 | 累计兜底处理: {len(self._history)} 次\n\n"
-                            "💡 机制说明：当您在 MoviePilot 中添加 TMDB 尚未录入分集的剧集时，本插件会自动将总集数推算为默认值（如 1 集）使订阅成功创建。\n"
-                            "后续 TMDB 官方录入真实集数（如 12 或 24 集）后，系统定时巡检会自动升级覆盖为真实总集数。"
+                            f"【待定集数兜底】全局默认: {self._default_episodes} 集 | 自定义规则: {len(self._custom_rules)} 条 | 累计兜底: {len(self._history)} 次\n"
+                            f"【成人内容搜索】{adult_search_status}\n\n"
+                            "💡 机制说明：\n"
+                            "1. 待定集数兜底：当在 MoviePilot 中添加 TMDB 尚未录入分集的剧集时，自动推算总集数使订阅成功创建。后续官方录入真实集数后会自动升级同步。\n"
+                            "2. 成人内容搜索：仅在主动搜索媒体时允许 TMDB 返回成人影视内容，后台自动下载、整理、刮削匹配等仍走严格非成人匹配，完全互不干扰。"
                         ),
                     },
                 ],
@@ -373,5 +507,5 @@ class EpisodeFallback(_PluginBase):
         return []
 
     def stop_service(self) -> None:
-        """停止插件服务。"""
-        pass
+        """停止插件服务并清理切面。"""
+        _restore_tmdb_adult_hooks()
