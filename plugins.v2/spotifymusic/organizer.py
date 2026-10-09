@@ -125,6 +125,7 @@ def transfer_to_destination(
     template: str,
     track_info: Dict[str, Any],
     playlist_name: Optional[str] = None,
+    generate_m3u: bool = False,
 ) -> Tuple[Path, Optional[Path]]:
     """
     将临时目录中的音频与歌词文件安全移动到目标目录。
@@ -135,6 +136,7 @@ def transfer_to_destination(
     :param template: 路径模板
     :param track_info: 曲目元数据
     :param playlist_name: 歌单名（可选）
+    :param generate_m3u: 是否生成 .m3u8 播放列表文件（默认 False）
     :return: (最终音频路径, 最终歌词路径)
     """
     dest_base = Path(destination_root)
@@ -156,8 +158,8 @@ def transfer_to_destination(
         shutil.move(str(lrc_temp_path), str(final_lrc_path))
         logger.debug(f"歌词文件整理成功: {final_lrc_path}")
 
-    # 歌单 M3U 文件自动追加
-    if playlist_name:
+    # 歌单 M3U 文件自动追加 (仅当开启生成开关且指定了歌单名)
+    if generate_m3u and playlist_name:
         try:
             _append_to_m3u(dest_base, playlist_name, final_audio_path, track_info)
         except Exception as e:

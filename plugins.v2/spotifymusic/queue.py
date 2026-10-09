@@ -42,6 +42,7 @@ class DownloadQueueManager:
         audio_bitrate: str = '320',
         max_parallel: int = 3,
         download_lyrics: bool = True,
+        generate_m3u: bool = False,
         proxy: Optional[str] = None,
         on_task_completed: Optional[Callable[[Dict[str, Any], Path], None]] = None,
     ) -> None:
@@ -53,6 +54,7 @@ class DownloadQueueManager:
         self.audio_bitrate = audio_bitrate
         self.max_parallel = max(1, int(max_parallel))
         self.download_lyrics = download_lyrics
+        self.generate_m3u = generate_m3u
         self.proxy = proxy
         self.on_task_completed = on_task_completed
 
@@ -83,6 +85,7 @@ class DownloadQueueManager:
         audio_bitrate: Optional[str] = None,
         max_parallel: Optional[int] = None,
         download_lyrics: Optional[bool] = None,
+        generate_m3u: Optional[bool] = None,
         proxy: Optional[str] = None,
     ) -> None:
         """动态更新队列运行参数。"""
@@ -96,6 +99,8 @@ class DownloadQueueManager:
             self.audio_bitrate = str(audio_bitrate)
         if download_lyrics is not None:
             self.download_lyrics = download_lyrics
+        if generate_m3u is not None:
+            self.generate_m3u = generate_m3u
         if proxy is not None:
             self.proxy = proxy or None
         if max_parallel and max_parallel != self.max_parallel:
@@ -266,6 +271,7 @@ class DownloadQueueManager:
                 template=self.template,
                 track_info=track,
                 playlist_name=job.playlist_name,
+                generate_m3u=self.generate_m3u,
             )
 
             # 更新任务完成状态

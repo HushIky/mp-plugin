@@ -37,7 +37,7 @@ class SpotifyMusic(_PluginBase):
     plugin_name = "Spotify音乐下载与订阅"
     plugin_desc = "支持 Spotify 链接解析、音乐搜索、歌单/艺术家增量订阅、元数据标签/封面/歌词内嵌与目录自动整理。"
     plugin_icon = "spotifymusic.png"
-    plugin_version = "1.1.14"
+    plugin_version = "1.1.15"
     plugin_label = "音乐管理"
     plugin_author = "local"
     plugin_order = 10
@@ -56,6 +56,7 @@ class SpotifyMusic(_PluginBase):
     _audio_bitrate: str = "320"
     _template: str = "{artist}/{album} ({year})/{track_number:02d} - {title}.{ext}"
     _download_lyrics: bool = True
+    _generate_m3u: bool = False
     _notify_success: bool = True
     _interval_minutes: int = 60
     _max_parallel: int = 3
@@ -82,6 +83,7 @@ class SpotifyMusic(_PluginBase):
             config.get("template") or "{artist}/{album} ({year})/{track_number:02d} - {title}.{ext}"
         ).strip()
         self._download_lyrics = bool(config.get("download_lyrics", True))
+        self._generate_m3u = bool(config.get("generate_m3u", False))
         self._notify_success = bool(config.get("notify_download_success", True))
         self._interval_minutes = int(config.get("interval_minutes") or 60)
         self._max_parallel = int(config.get("max_parallel") or 3)
@@ -104,6 +106,7 @@ class SpotifyMusic(_PluginBase):
             audio_bitrate=self._audio_bitrate,
             max_parallel=self._max_parallel,
             download_lyrics=self._download_lyrics,
+            generate_m3u=self._generate_m3u,
             proxy=self._proxy or None,
             on_task_completed=self._on_download_completed,
         )
@@ -316,8 +319,8 @@ class SpotifyMusic(_PluginBase):
                                     {
                                         "component": "VSwitch",
                                         "props": {
-                                            "model": "notify_download_success",
-                                            "label": "下载完成发送系统通知",
+                                            "model": "generate_m3u",
+                                            "label": "生成歌单 M3U8 播放列表 (默认关闭)",
                                         },
                                     }
                                 ],
@@ -327,6 +330,19 @@ class SpotifyMusic(_PluginBase):
                     {
                         "component": "VRow",
                         "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {
+                                        "component": "VSwitch",
+                                        "props": {
+                                            "model": "notify_download_success",
+                                            "label": "下载完成发送系统通知",
+                                        },
+                                    }
+                                ],
+                            },
                             {
                                 "component": "VCol",
                                 "props": {"cols": 12, "md": 6},
@@ -342,9 +358,14 @@ class SpotifyMusic(_PluginBase):
                                     }
                                 ],
                             },
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
                             {
                                 "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
+                                "props": {"cols": 12},
                                 "content": [
                                     {
                                         "component": "VTextField",
@@ -422,6 +443,7 @@ class SpotifyMusic(_PluginBase):
             "bitrate": "320",
             "template": "{artist}/{album} ({year})/{track_number:02d} - {title}.{ext}",
             "download_lyrics": True,
+            "generate_m3u": False,
             "notify_download_success": True,
             "interval_minutes": 60,
             "max_parallel": 3,
