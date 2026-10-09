@@ -35,6 +35,7 @@ try:
         TPE2,
         TPOS,
         TRCK,
+        TXXX,
         USLT,
     )
     from mutagen.mp3 import MP3
@@ -81,6 +82,46 @@ def format_multi_artists(val: Any) -> str:
             return ", ".join(parts)
         return val
     return str(val).strip()
+
+
+def extract_artists_list(val: Any) -> List[str]:
+    """
+    将艺术家 / 专辑艺术家提取为纯净的艺术家名称列表（用于多值音频标签写入）。
+
+    支持传入 list[str]、tuple、set 以及包含常见分隔符（' / '、';'、'、'、', '）的单个字符串。
+    """
+    if not val:
+        return []
+    if isinstance(val, (list, tuple, set)):
+        artists: List[str] = []
+        for item in val:
+            if not item:
+                continue
+            item_str = str(item).strip()
+            if item_str and item_str not in artists:
+                artists.append(item_str)
+        return artists
+    if isinstance(val, str):
+        val = val.strip()
+        if not val:
+            return []
+        if " / " in val:
+            parts = [p.strip() for p in val.split(" / ") if p.strip()]
+        elif ";" in val:
+            parts = [p.strip() for p in val.split(";") if p.strip()]
+        elif "、" in val:
+            parts = [p.strip() for p in val.split("、") if p.strip()]
+        elif ", " in val:
+            parts = [p.strip() for p in val.split(", ") if p.strip()]
+        else:
+            parts = [val]
+
+        artists: List[str] = []
+        for p in parts:
+            if p and p not in artists:
+                artists.append(p)
+        return artists
+    return [str(val).strip()] if str(val).strip() else []
 
 
 class MusicDownloader:
@@ -271,12 +312,21 @@ class MusicDownloader:
         """根据音频格式执行具体的元数据打标。"""
         ext = audio_path.suffix.lower()
         title = str(track_info.get("title") or track_info.get("name") or "").strip()
-        
-        # 艺术家与专辑艺术家统一使用逗号+空格 ', ' 格式化
-        artist = format_multi_artists(track_info.get("artists") or track_info.get("artist")) or "Unknown Artist"
-        album_artist = format_multi_artists(
+
+        # 提取多艺术家列表（用于写入多值音频标签）与展示单字符串形式
+        artists_list = extract_artists_list(track_info.get("artists"))
+        if not artists_list:
+            artists_list = extract_artists_list(track_info.get("artist"))
+        if not artists_list:
+            artists_list = ["Unknown Artist"]
+        artist_str = ", ".join(artists_list)
+
+        album_artists_list = extract_artists_list(
             track_info.get("album_artists") or track_info.get("album_artist") or track_info.get("albumartist")
-        ) or artist
+        )
+        if not album_artists_list:
+            album_artists_list = list(artists_list)
+        album_artist_str = ", ".join(album_artists_list)
 
         album = str(track_info.get("album") or "").strip()
         track_num = int(track_info.get("track_number") or 1)
@@ -292,23 +342,23 @@ class MusicDownloader:
         try:
             if ext == '.mp3':
                 self._tag_mp3(
-                    audio_path, title, artist, album_artist, album, track_num, total_tracks,
-                    disc_num, year, release_date, cover_bytes, lyrics_text
+                    audio_path, title, artists_list, artist_str, album_artists_list, album_artist_str,
+                    album, track_num, total_tracks, disc_num, year, release_date, cover_bytes, lyrics_text
                 )
             elif ext == '.flac':
                 self._tag_flac(
-                    audio_path, title, artist, album_artist, album, track_num, total_tracks,
-                    disc_num, year, release_date, cover_bytes, lyrics_text
+                    audio_path, title, artists_list, artist_str, album_artists_list, album_artist_str,
+                    album, track_num, total_tracks, disc_num, year, release_date, cover_bytes, lyrics_text
                 )
             elif ext in ('.m4a', '.mp4', '.aac'):
                 self._tag_mp4(
-                    audio_path, title, artist, album_artist, album, track_num, total_tracks,
-                    disc_num, year, cover_bytes, lyrics_text
+                    audio_path, title, artists_list, artist_str, album_artists_list, album_artist_str,
+                    album, track_num, total_tracks, disc_num, year, cover_bytes, lyrics_text
                 )
             elif ext in ('.opus', '.ogg'):
                 self._tag_ogg(
-                    audio_path, title, artist, album_artist, album, track_num, total_tracks,
-                    disc_num, year, cover_bytes, lyrics_text
+                    audio_path, title, artists_list, artist_str, album_artists_list, album_artist_str,
+                    album, track_num, total_tracks, disc_num, year, cover_bytes, lyrics_text
                 )
         except Exception as e:
             logger.warning(f"为文件 {audio_path.name} 打标失败: {e}")
@@ -317,17 +367,43 @@ class MusicDownloader:
     def _tag_mp3(
         path: Path,
         title: str,
-        artist: str,
-        album_artist: str,
-        album: str,
-        track: int,
-        total_tracks: int,
-        disc: int,
-        year: str,
-        date: str,
-        cover: Optional[bytes],
-        lyrics: str,
+        artists: Optional[List[str] | str] = None,
+        artist_str: str = "",
+        album_artists: Optional[List[str] | str] = None,
+        album_artist_str: str = "",
+        album: str = "",
+        track: int = 1,
+        total_tracks: int = 0,
+        disc: int = 1,
+        year: str = "",
+        date: str = "",
+        cover: Optional[bytes] = None,
+        lyrics: str = "",
+        artist: Optional[List[str] | str] = None,
+        album_artist: Optional[List[str] | str] = None,
     ) -> None:
+        if artists is None:
+            artists = artist or ""
+        if album_artists is None:
+            album_artists = album_artist
+
+        if isinstance(artists, str):
+            artists_list = extract_artists_list(artists)
+            artist_str = artist_str or artists
+        else:
+            artists_list = list(artists) if artists else []
+            artist_str = artist_str or ", ".join(artists_list)
+
+        if isinstance(album_artists, str):
+            album_artists_list = extract_artists_list(album_artists)
+            album_artist_str = album_artist_str or album_artists
+        elif album_artists is not None:
+            album_artists_list = list(album_artists)
+            album_artist_str = album_artist_str or ", ".join(album_artists_list)
+        else:
+            album_artists_list = list(artists_list)
+            album_artist_str = album_artist_str or artist_str
+
         try:
             audio = MP3(str(path))
             if audio.tags is None:
@@ -341,9 +417,19 @@ class MusicDownloader:
             audio = None
 
         tags.add(TIT2(encoding=3, text=title))
-        tags.add(TPE1(encoding=3, text=artist))
-        if album_artist:
-            tags.add(TPE2(encoding=3, text=album_artist))
+        # TPE1 写入艺术家列表（ID3v2.4 UTF-8 多值使用 null 分隔，Navidrome/Jellyfin/Picard 均标准支持）
+        tags.add(TPE1(encoding=3, text=artists_list if artists_list else [artist_str]))
+        if album_artists_list:
+            tags.add(TPE2(encoding=3, text=album_artists_list))
+        elif album_artist_str:
+            tags.add(TPE2(encoding=3, text=[album_artist_str]))
+        # 补充通用 TXXX:ARTISTS 与 TXXX:Artists 自定义字段（兼容更多媒体库对多艺术家的识别）
+        if artists_list and len(artists_list) > 1:
+            try:
+                tags.add(TXXX(encoding=3, desc='ARTISTS', text=artists_list))
+                tags.add(TXXX(encoding=3, desc='Artists', text=artists_list))
+            except Exception:
+                pass
         if album:
             tags.add(TALB(encoding=3, text=album))
         track_str = f"{track}/{total_tracks}" if total_tracks > 0 else f"{track}"
@@ -362,28 +448,57 @@ class MusicDownloader:
         else:
             tags.save(str(path))
 
-
     @staticmethod
     def _tag_flac(
         path: Path,
         title: str,
-        artist: str,
-        album_artist: str,
-        album: str,
-        track: int,
-        total_tracks: int,
-        disc: int,
-        year: str,
-        date: str,
-        cover: Optional[bytes],
-        lyrics: str,
+        artists: Optional[List[str] | str] = None,
+        artist_str: str = "",
+        album_artists: Optional[List[str] | str] = None,
+        album_artist_str: str = "",
+        album: str = "",
+        track: int = 1,
+        total_tracks: int = 0,
+        disc: int = 1,
+        year: str = "",
+        date: str = "",
+        cover: Optional[bytes] = None,
+        lyrics: str = "",
+        artist: Optional[List[str] | str] = None,
+        album_artist: Optional[List[str] | str] = None,
     ) -> None:
+        if artists is None:
+            artists = artist or ""
+        if album_artists is None:
+            album_artists = album_artist
+
+        if isinstance(artists, str):
+            artists_list = extract_artists_list(artists)
+            artist_str = artist_str or artists
+        else:
+            artists_list = list(artists) if artists else []
+            artist_str = artist_str or ", ".join(artists_list)
+
+        if isinstance(album_artists, str):
+            album_artists_list = extract_artists_list(album_artists)
+            album_artist_str = album_artist_str or album_artists
+        elif album_artists is not None:
+            album_artists_list = list(album_artists)
+            album_artist_str = album_artist_str or ", ".join(album_artists_list)
+        else:
+            album_artists_list = list(artists_list)
+            album_artist_str = album_artist_str or artist_str
+
         audio = FLAC(str(path))
         audio['title'] = title
-        audio['artist'] = artist
-        if album_artist:
-            audio['albumartist'] = album_artist
-            audio['album_artist'] = album_artist
+        # Vorbis comments: audio['artist'] 接受列表，保存时会写入多个独立的 ARTIST 字段
+        audio['artist'] = artists_list if artists_list else [artist_str]
+        if album_artists_list:
+            audio['albumartist'] = album_artists_list
+            audio['album_artist'] = album_artists_list
+        elif album_artist_str:
+            audio['albumartist'] = [album_artist_str]
+            audio['album_artist'] = [album_artist_str]
         if album:
             audio['album'] = album
         audio['tracknumber'] = str(track)
@@ -410,21 +525,49 @@ class MusicDownloader:
     def _tag_mp4(
         path: Path,
         title: str,
-        artist: str,
-        album_artist: str,
-        album: str,
-        track: int,
-        total_tracks: int,
-        disc: int,
-        year: str,
-        cover: Optional[bytes],
-        lyrics: str,
+        artists: Optional[List[str] | str] = None,
+        artist_str: str = "",
+        album_artists: Optional[List[str] | str] = None,
+        album_artist_str: str = "",
+        album: str = "",
+        track: int = 1,
+        total_tracks: int = 0,
+        disc: int = 1,
+        year: str = "",
+        cover: Optional[bytes] = None,
+        lyrics: str = "",
+        artist: Optional[List[str] | str] = None,
+        album_artist: Optional[List[str] | str] = None,
     ) -> None:
+        if artists is None:
+            artists = artist or ""
+        if album_artists is None:
+            album_artists = album_artist
+
+        if isinstance(artists, str):
+            artists_list = extract_artists_list(artists)
+            artist_str = artist_str or artists
+        else:
+            artists_list = list(artists) if artists else []
+            artist_str = artist_str or ", ".join(artists_list)
+
+        if isinstance(album_artists, str):
+            album_artists_list = extract_artists_list(album_artists)
+            album_artist_str = album_artist_str or album_artists
+        elif album_artists is not None:
+            album_artists_list = list(album_artists)
+            album_artist_str = album_artist_str or ", ".join(album_artists_list)
+        else:
+            album_artists_list = list(artists_list)
+            album_artist_str = album_artist_str or artist_str
+
         audio = MP4(str(path))
         audio['\xa9nam'] = [title]
-        audio['\xa9ART'] = [artist]
-        if album_artist:
-            audio['aART'] = [album_artist]
+        audio['\xa9ART'] = artists_list if artists_list else [artist_str]
+        if album_artists_list:
+            audio['aART'] = album_artists_list
+        elif album_artist_str:
+            audio['aART'] = [album_artist_str]
         if album:
             audio['\xa9alb'] = [album]
         audio['trkn'] = [(track, total_tracks if total_tracks > 0 else 0)]
@@ -442,25 +585,54 @@ class MusicDownloader:
     def _tag_ogg(
         path: Path,
         title: str,
-        artist: str,
-        album_artist: str,
-        album: str,
-        track: int,
-        total_tracks: int,
-        disc: int,
-        year: str,
-        cover: Optional[bytes],
-        lyrics: str,
+        artists: Optional[List[str] | str] = None,
+        artist_str: str = "",
+        album_artists: Optional[List[str] | str] = None,
+        album_artist_str: str = "",
+        album: str = "",
+        track: int = 1,
+        total_tracks: int = 0,
+        disc: int = 1,
+        year: str = "",
+        cover: Optional[bytes] = None,
+        lyrics: str = "",
+        artist: Optional[List[str] | str] = None,
+        album_artist: Optional[List[str] | str] = None,
     ) -> None:
+        if artists is None:
+            artists = artist or ""
+        if album_artists is None:
+            album_artists = album_artist
+
+        if isinstance(artists, str):
+            artists_list = extract_artists_list(artists)
+            artist_str = artist_str or artists
+        else:
+            artists_list = list(artists) if artists else []
+            artist_str = artist_str or ", ".join(artists_list)
+
+        if isinstance(album_artists, str):
+            album_artists_list = extract_artists_list(album_artists)
+            album_artist_str = album_artist_str or album_artists
+        elif album_artists is not None:
+            album_artists_list = list(album_artists)
+            album_artist_str = album_artist_str or ", ".join(album_artists_list)
+        else:
+            album_artists_list = list(artists_list)
+            album_artist_str = album_artist_str or artist_str
+
         try:
             audio = OggOpus(str(path))
         except Exception:
             audio = OggVorbis(str(path))
         audio['title'] = [title]
-        audio['artist'] = [artist]
-        if album_artist:
-            audio['albumartist'] = [album_artist]
-            audio['album_artist'] = [album_artist]
+        audio['artist'] = artists_list if artists_list else [artist_str]
+        if album_artists_list:
+            audio['albumartist'] = album_artists_list
+            audio['album_artist'] = album_artists_list
+        elif album_artist_str:
+            audio['albumartist'] = [album_artist_str]
+            audio['album_artist'] = [album_artist_str]
         if album:
             audio['album'] = [album]
         audio['tracknumber'] = [str(track)]
