@@ -166,6 +166,8 @@ class MusicDownloader:
         artists_raw = track_info.get("artists")
         artist = format_multi_artists(artists_raw) or format_multi_artists(track_info.get("artist")) or "Unknown Artist"
         album = str(track_info.get("album") or "").strip()
+        search_title = str(track_info.get("search_title") or title).strip()
+        search_album = str(track_info.get("search_album") or album).strip()
         duration = int(track_info.get("duration") or 0)
         cover_url = str(track_info.get("cover_url") or "").strip()
         youtube_id = track_info.get("youtube_id")
@@ -173,12 +175,12 @@ class MusicDownloader:
         if progress_callback:
             progress_callback(5.0, "正在匹配音源...")
 
-        # 1. 匹配 YouTube 音源
+        # 1. 匹配 YouTube 音源（优先使用原始 Spotify 英文标题确保检索准确度）
         if not youtube_id:
             matched = match_youtube_track(
-                title=title,
+                title=search_title,
                 artist=artist,
-                album=album,
+                album=search_album,
                 duration=duration,
                 proxy=self.proxy,
             )
@@ -274,9 +276,9 @@ class MusicDownloader:
         lrc_file = None
         if self.download_lyrics:
             lyrics_res = fetch_lyrics(
-                title=title,
+                title=search_title,
                 artist=artist,
-                album=album,
+                album=search_album,
                 duration=duration,
                 proxy=self.proxy,
             )

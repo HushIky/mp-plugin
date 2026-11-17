@@ -37,7 +37,7 @@ class SpotifyMusic(_PluginBase):
     plugin_name = "Spotify音乐下载与订阅"
     plugin_desc = "支持 Spotify 链接解析、音乐搜索、歌单/艺术家增量订阅、元数据标签/封面/歌词内嵌与目录自动整理。"
     plugin_icon = "spotifymusic.png"
-    plugin_version = "1.1.15"
+    plugin_version = "1.1.17"
     plugin_label = "音乐管理"
     plugin_author = "local"
     plugin_order = 10
@@ -57,8 +57,10 @@ class SpotifyMusic(_PluginBase):
     _template: str = "{artist}/{album} ({year})/{track_number:02d} - {title}.{ext}"
     _download_lyrics: bool = True
     _generate_m3u: bool = False
+    _zh_metadata_match: bool = True
     _notify_success: bool = True
     _interval_minutes: int = 60
+    _subscription_delay_hours: float = 24.0
     _max_parallel: int = 3
     _proxy: str = ""
     _spotify_client_id: str = ""
@@ -84,8 +86,17 @@ class SpotifyMusic(_PluginBase):
         ).strip()
         self._download_lyrics = bool(config.get("download_lyrics", True))
         self._generate_m3u = bool(config.get("generate_m3u", False))
+        self._zh_metadata_match = bool(config.get("zh_metadata_match", True))
         self._notify_success = bool(config.get("notify_download_success", True))
         self._interval_minutes = int(config.get("interval_minutes") or 60)
+        raw_delay = config.get("subscription_delay_hours")
+        if raw_delay is None or str(raw_delay).strip() == "":
+            self._subscription_delay_hours = 24.0
+        else:
+            try:
+                self._subscription_delay_hours = max(0.0, float(raw_delay))
+            except (TypeError, ValueError):
+                self._subscription_delay_hours = 24.0
         self._max_parallel = int(config.get("max_parallel") or 3)
         self._proxy = str(config.get("proxy") or "").strip()
         self._spotify_client_id = str(config.get("spotify_client_id") or "").strip()
@@ -107,6 +118,7 @@ class SpotifyMusic(_PluginBase):
             max_parallel=self._max_parallel,
             download_lyrics=self._download_lyrics,
             generate_m3u=self._generate_m3u,
+            zh_metadata_match=self._zh_metadata_match,
             proxy=self._proxy or None,
             on_task_completed=self._on_download_completed,
         )
@@ -337,8 +349,8 @@ class SpotifyMusic(_PluginBase):
                                     {
                                         "component": "VSwitch",
                                         "props": {
-                                            "model": "notify_download_success",
-                                            "label": "下载完成发送系统通知",
+                                            "model": "zh_metadata_match",
+                                            "label": "中文元数据交叉匹配 (保留网易云元标题)",
                                         },
                                     }
                                 ],
@@ -346,6 +358,24 @@ class SpotifyMusic(_PluginBase):
                             {
                                 "component": "VCol",
                                 "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {
+                                        "component": "VSwitch",
+                                        "props": {
+                                            "model": "notify_download_success",
+                                            "label": "下载完成发送系统通知",
+                                        },
+                                    }
+                                ],
+                            },
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
                                 "content": [
                                     {
                                         "component": "VTextField",
@@ -358,14 +388,26 @@ class SpotifyMusic(_PluginBase):
                                     }
                                 ],
                             },
-                        ],
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
                             {
                                 "component": "VCol",
-                                "props": {"cols": 12},
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "subscription_delay_hours",
+                                            "label": "订阅新增曲目延迟下载 (小时)",
+                                            "placeholder": "24",
+                                            "type": "number",
+                                            "hint": "新检测到的订阅曲目先入队并延迟指定小时再下载（如 12/24/48，填 0 不延迟）",
+                                            "persistentHint": True,
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
                                 "content": [
                                     {
                                         "component": "VTextField",
@@ -444,8 +486,10 @@ class SpotifyMusic(_PluginBase):
             "template": "{artist}/{album} ({year})/{track_number:02d} - {title}.{ext}",
             "download_lyrics": True,
             "generate_m3u": False,
+            "zh_metadata_match": True,
             "notify_download_success": True,
             "interval_minutes": 60,
+            "subscription_delay_hours": 24,
             "max_parallel": 3,
             "proxy": "",
             "spotify_client_id": "",
@@ -472,7 +516,7 @@ class SpotifyMusic(_PluginBase):
         active_tasks = [
             t
             for t in tasks
-            if t.get("status") in ("downloading", "processing", "pending")
+            if t.get("status") in ("downloading", "processing", "pending", "delayed")
         ]
         failed_tasks = [t for t in tasks if t.get("status") == "failed"]
 
@@ -719,6 +763,14 @@ class SpotifyMusic(_PluginBase):
                 "summary": "重试单个任务",
                 "description": "重新排队执行指定的失败任务",
             },
+            {
+                "path": "/tasks/{task_id}/run_now",
+                "endpoint": self.api_run_delayed_task_now,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "立即执行延迟任务",
+                "description": "跳过延迟等待，立即将指定延迟任务排入下载队列",
+            },
         ]
 
     # ==================== API 路由处理逻辑 ====================
@@ -898,6 +950,7 @@ class SpotifyMusic(_PluginBase):
                     threading.Thread(
                         target=self._sync_single_subscription,
                         args=(sub_record,),
+                        kwargs={"is_initial_sync": True},
                         daemon=True,
                         name=f"SpotifyMusicArtistSync-{sub_id}",
                     ).start()
@@ -918,6 +971,7 @@ class SpotifyMusic(_PluginBase):
                     threading.Thread(
                         target=self._sync_single_subscription,
                         args=(sub_record,),
+                        kwargs={"is_initial_sync": True},
                         daemon=True,
                         name=f"SpotifyMusicArtistSync-{sub_id}",
                     ).start()
@@ -1016,6 +1070,18 @@ class SpotifyMusic(_PluginBase):
                 requeued_count += 1
         return {"success": True, "message": f"已重新排队 {requeued_count} 个失败任务"}
 
+    def api_run_delayed_task_now(self, task_id: str) -> Dict[str, Any]:
+        """跳过延迟等待，立即执行指定延迟任务。"""
+        if not self._db or not self._queue_mgr:
+            return {"success": False, "message": "插件尚未初始化"}
+        task = self._db.get_task(task_id)
+        if not task:
+            return {"success": False, "message": "任务不存在"}
+        ok = self._queue_mgr.run_delayed_task_now(task_id)
+        if ok:
+            return {"success": True, "message": f"已将延迟任务《{task.get('title', task_id)}》立即推入下载队列"}
+        return {"success": False, "message": "当前任务非延迟等待状态或调度失败"}
+
     # ==================== 后台调度与同步逻辑 ====================
 
     def check_all_subscriptions(self) -> None:
@@ -1038,7 +1104,7 @@ class SpotifyMusic(_PluginBase):
                 continue
             self._sync_single_subscription(sub)
 
-    def _sync_single_subscription(self, sub: Dict[str, Any]) -> None:
+    def _sync_single_subscription(self, sub: Dict[str, Any], is_initial_sync: bool = False) -> None:
         """执行单项订阅的增量检查与下载排队。"""
         db = self._db
         if not db or not self._queue_mgr:
@@ -1046,6 +1112,11 @@ class SpotifyMusic(_PluginBase):
         sub_id = sub["id"]
         sub_name = sub.get("name", "")
         url = sub.get("url", "")
+        delay_hours = (
+            0.0
+            if (is_initial_sync or sub.get("sync_mode") == "once")
+            else self._subscription_delay_hours
+        )
         logger.info(f"[{self.plugin_name}] 开始检查订阅更新: {sub_name} ({url})")
 
         try:
@@ -1087,8 +1158,17 @@ class SpotifyMusic(_PluginBase):
                         album_tracks = album_ent.get("tracks") or []
                         for t in album_tracks:
                             t_id = t.get("spotify_id")
-                            if t_id and not db.is_track_in_history(sub_id, t_id):
-                                self._queue_mgr.submit_track(t, subscription_id=sub_id, playlist_name=sub_name)
+                            if (
+                                t_id
+                                and not db.is_track_in_history(sub_id, t_id)
+                                and not db.has_active_task_for_track(sub_id, t_id)
+                            ):
+                                self._queue_mgr.submit_track(
+                                    t,
+                                    subscription_id=sub_id,
+                                    playlist_name=sub_name,
+                                    delay_hours=delay_hours,
+                                )
                                 db.record_track_history(
                                     sub_id=sub_id,
                                     track_spotify_id=t_id,
@@ -1117,15 +1197,25 @@ class SpotifyMusic(_PluginBase):
                 )
                 db.update_subscription_stats(sub_id, total_tracks=total_tracks_count)
                 if new_releases_count > 0:
+                    delay_note = (
+                        f"（延迟 {int(delay_hours) if delay_hours.is_integer() else delay_hours} 小时后自动执行）"
+                        if delay_hours > 0
+                        else ""
+                    )
                     logger.info(
                         f"[{self.plugin_name}] 艺术家 [{sub_name}] 发现 {new_releases_count} 张新唱片"
-                        f" (共 {new_tracks_count} 首曲目)，已加入下载队列"
+                        f" (共 {new_tracks_count} 首曲目)，已加入下载队列{delay_note}"
                     )
                     if self._notify_success:
+                        action_desc = (
+                            f"已加入延迟下载队列，将在 {int(delay_hours) if delay_hours.is_integer() else delay_hours} 小时后自动下载并整理归档。"
+                            if delay_hours > 0
+                            else "正在后台自动下载并整理归档。"
+                        )
                         self.post_message(
                             mtype=NotificationType.Plugin,
                             title=f"🎵 艺术家发布新作品: {sub_name}",
-                            text=f"检测到 {new_releases_count} 张新唱片（共 {new_tracks_count} 首曲目），正在后台自动下载并整理归档。",
+                            text=f"检测到 {new_releases_count} 张新唱片（共 {new_tracks_count} 首曲目），{action_desc}",
                         )
                 return
 
@@ -1135,19 +1225,34 @@ class SpotifyMusic(_PluginBase):
                 t_id = t.get("spotify_id")
                 if not t_id:
                     continue
-                # 比对历史表
-                if not db.is_track_in_history(sub_id, t_id):
-                    self._queue_mgr.submit_track(t, subscription_id=sub_id, playlist_name=sub_name)
+                # 比对历史表与进行中/延迟任务表，避免延迟期间重复入队
+                if not db.is_track_in_history(sub_id, t_id) and not db.has_active_task_for_track(sub_id, t_id):
+                    self._queue_mgr.submit_track(
+                        t,
+                        subscription_id=sub_id,
+                        playlist_name=sub_name,
+                        delay_hours=delay_hours,
+                    )
                     new_tracks_count += 1
 
             db.update_subscription_stats(sub_id, total_tracks=len(tracks))
             if new_tracks_count > 0:
-                logger.info(f"[{self.plugin_name}] 订阅 [{sub_name}] 发现 {new_tracks_count} 首新曲目，已加入下载队列")
+                delay_note = (
+                    f"（延迟 {int(delay_hours) if delay_hours.is_integer() else delay_hours} 小时后自动执行）"
+                    if delay_hours > 0
+                    else ""
+                )
+                logger.info(f"[{self.plugin_name}] 订阅 [{sub_name}] 发现 {new_tracks_count} 首新曲目，已加入下载队列{delay_note}")
                 if self._notify_success:
+                    action_desc = (
+                        f"已加入延迟下载队列，将在 {int(delay_hours) if delay_hours.is_integer() else delay_hours} 小时后自动下载并整理归档。"
+                        if delay_hours > 0
+                        else "正在后台自动下载并整理归档。"
+                    )
                     self.post_message(
                         mtype=NotificationType.Plugin,
                         title=f"🎵 Spotify 订阅更新: {sub_name}",
-                        text=f"检测到 {new_tracks_count} 首新曲目，正在后台自动下载并整理归档。",
+                        text=f"检测到 {new_tracks_count} 首新曲目，{action_desc}",
                     )
         except Exception as e:
             logger.error(f"[{self.plugin_name}] 检查订阅 [{sub_name}] 失败: {e}")
@@ -1260,6 +1365,7 @@ class SpotifyMusic(_PluginBase):
                     threading.Thread(
                         target=self._sync_single_subscription,
                         args=(sub_record,),
+                        kwargs={"is_initial_sync": True},
                         daemon=True,
                         name=f"SpotifyMusicArtistSync-{sub_id}",
                     ).start()

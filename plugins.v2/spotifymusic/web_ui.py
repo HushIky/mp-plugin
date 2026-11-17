@@ -841,6 +841,7 @@ def render_music_workbench_html(
                 ></div>
               </div>
               <p v-if="task.error_msg || task.error" class="text-[10px] text-rose-400 truncate mt-1" :title="task.error_msg || task.error">{{{{ task.error_msg || task.error }}}}</p>
+              <p v-else-if="task.status === 'delayed' && task.execute_after" class="text-[10px] text-indigo-300 truncate mt-1">计划执行: {{{{ formatTime(task.execute_after) }}}}</p>
             </div>
 
             <span 
@@ -851,6 +852,17 @@ def render_music_workbench_html(
             </span>
 
             <div class="flex items-center gap-1.5 flex-shrink-0">
+              <button 
+                v-if="task.status === 'delayed'"
+                @click="runDelayedNow(task)"
+                :disabled="runningNowMap[task.id]"
+                class="px-2 py-1 rounded-lg bg-indigo-950/50 hover:bg-indigo-900/70 text-indigo-300 hover:text-white border border-indigo-700/60 transition text-[11px] flex items-center gap-1"
+                title="跳过延迟等待，立即下载此任务"
+              >
+                <i class="fa-solid fa-play" :class="{{ 'fa-spin': runningNowMap[task.id] }}"></i>
+                <span>立即下载</span>
+              </button>
+
               <button 
                 v-if="task.status === 'failed'"
                 @click="retryTask(task)"
@@ -866,12 +878,12 @@ def render_music_workbench_html(
                 @click="deleteTask(task)"
                 :disabled="deletingTaskMap[task.id]"
                 class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-rose-950/60 text-slate-400 hover:text-rose-300 border border-slate-700 hover:border-rose-900/60 transition text-[11px] flex items-center gap-1"
-                :title="['downloading', 'pending', 'matching', 'processing', 'tagging'].includes(task.status) ? '取消并删除此下载任务' : '删除此任务记录'"
+                :title="['downloading', 'pending', 'delayed', 'matching', 'processing', 'tagging'].includes(task.status) ? '取消并删除此下载任务' : '删除此任务记录'"
               >
                 <i v-if="deletingTaskMap[task.id]" class="fa-solid fa-spinner fa-spin"></i>
-                <i v-else-if="['downloading', 'pending', 'matching', 'processing', 'tagging'].includes(task.status)" class="fa-solid fa-ban"></i>
+                <i v-else-if="['downloading', 'pending', 'delayed', 'matching', 'processing', 'tagging'].includes(task.status)" class="fa-solid fa-ban"></i>
                 <i v-else class="fa-solid fa-trash-can"></i>
-                <span>{{{{ ['downloading', 'pending', 'matching', 'processing', 'tagging'].includes(task.status) ? '取消' : '删除' }}}}</span>
+                <span>{{{{ ['downloading', 'pending', 'delayed', 'matching', 'processing', 'tagging'].includes(task.status) ? '取消' : '删除' }}}}</span>
               </button>
             </div>
           </div>
@@ -1335,9 +1347,10 @@ def render_music_workbench_html(
         const retryingFailed = ref(false);
         const deletingTaskMap = ref({{}});
         const retryingTaskMap = ref({{}});
+        const runningNowMap = ref({{}});
 
         const activeTaskCount = computed(() => {{
-          return tasks.value.filter(t => t.status === 'pending' || t.status === 'downloading' || t.status === 'tagging' || t.status === 'matching' || t.status === 'processing').length;
+          return tasks.value.filter(t => t.status === 'pending' || t.status === 'delayed' || t.status === 'downloading' || t.status === 'tagging' || t.status === 'matching' || t.status === 'processing').length;
         }});
         const completedTaskCount = computed(() => {{
           return tasks.value.filter(t => t.status === 'completed').length;
@@ -1402,7 +1415,7 @@ def render_music_workbench_html(
 
         const deleteTask = async (task) => {{
           if (!task || !task.id) return;
-          const isPendingOrRunning = ['downloading', 'pending', 'matching', 'processing', 'tagging'].includes(task.status);
+          const isPendingOrRunning = ['downloading', 'pending', 'delayed', 'matching', 'processing', 'tagging'].includes(task.status);
           const actionText = isPendingOrRunning ? '取消' : '删除';
           if (!confirm(`确定要${{actionText}}任务【${{task.artist || ''}} - ${{task.title || ''}}】吗？`)) {{
             return;
@@ -1433,9 +1446,24 @@ def render_music_workbench_html(
           }}
         }};
 
+        const runDelayedNow = async (task) => {{
+          if (!task || !task.id) return;
+          runningNowMap.value[task.id] = true;
+          try {{
+            const res = await request(`/tasks/${{task.id}}/run_now`, {{ method: 'POST' }});
+            showToast(res.message || `已立即排入下载【${{task.title}}】`);
+            fetchTasks();
+          }} catch (e) {{
+            showToast('立即执行失败: ' + e.message, 'error');
+          }} finally {{
+            runningNowMap.value[task.id] = false;
+          }}
+        }};
+
         const getStatusText = (st) => {{
           const map = {{
             pending: '排队中',
+            delayed: '延迟等待中',
             matching: '音轨检索中',
             downloading: '正在下载音频',
             processing: '正在整理归档',
@@ -1449,6 +1477,7 @@ def render_music_workbench_html(
         const getStatusBadgeClass = (st) => {{
           const map = {{
             pending: 'bg-slate-700 text-slate-300',
+            delayed: 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/30',
             matching: 'bg-purple-500/20 text-purple-300 border border-purple-500/30',
             downloading: 'bg-amber-500/20 text-amber-300 border border-amber-500/30',
             processing: 'bg-blue-500/20 text-blue-300 border border-blue-500/30',
@@ -1555,6 +1584,7 @@ def render_music_workbench_html(
           retryingFailed,
           deletingTaskMap,
           retryingTaskMap,
+          runningNowMap,
           activeTaskCount,
           completedTaskCount,
           failedTaskCount,
@@ -1564,6 +1594,7 @@ def render_music_workbench_html(
           retryFailedTasks,
           deleteTask,
           retryTask,
+          runDelayedNow,
           getStatusText,
           getStatusBadgeClass,
           subscriptions,

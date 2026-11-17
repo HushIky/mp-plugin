@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
 from datetime import datetime, timezone
@@ -81,9 +82,24 @@ class MusicDatabase:
                     error_msg TEXT,
                     file_path TEXT,
                     created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
+                    updated_at TEXT NOT NULL,
+                    execute_after TEXT,
+                    track_payload TEXT,
+                    playlist_name TEXT
                 );
             """)
+            # 兼容历史数据库平滑补充新增字段
+            cols = {
+                row["name"]
+                for row in conn.execute("PRAGMA table_info(download_tasks)").fetchall()
+            }
+            for col_name, col_type in (
+                ("execute_after", "TEXT"),
+                ("track_payload", "TEXT"),
+                ("playlist_name", "TEXT"),
+            ):
+                if col_name not in cols:
+                    conn.execute(f"ALTER TABLE download_tasks ADD COLUMN {col_name} {col_type}")
 
     # ==================== 订阅管理 (Subscriptions) ====================
 
@@ -266,17 +282,37 @@ class MusicDatabase:
         cover_url: str = '',
         spotify_id: Optional[str] = None,
         subscription_id: Optional[int] = None,
+        status: str = 'pending',
+        execute_after: Optional[str] = None,
+        track_payload: Optional[Dict[str, Any]] = None,
+        playlist_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         """创建下载任务。"""
         now = _now_iso()
+        payload_json = json.dumps(track_payload, ensure_ascii=False) if track_payload else None
         with self._lock, self._connect() as conn:
             conn.execute(
                 """
                 INSERT INTO download_tasks
-                (id, title, artist, album, cover_url, spotify_id, subscription_id, status, progress, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', 0.0, ?, ?)
+                (id, title, artist, album, cover_url, spotify_id, subscription_id, status, progress,
+                 created_at, updated_at, execute_after, track_payload, playlist_name)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0.0, ?, ?, ?, ?, ?)
                 """,
-                (task_id, title, artist, album, cover_url, spotify_id, subscription_id, now, now),
+                (
+                    task_id,
+                    title,
+                    artist,
+                    album,
+                    cover_url,
+                    spotify_id,
+                    subscription_id,
+                    status,
+                    now,
+                    now,
+                    execute_after,
+                    payload_json,
+                    playlist_name,
+                ),
             )
         return self.get_task(task_id) or {}
 
@@ -372,3 +408,44 @@ class MusicDatabase:
                     (_now_iso(),),
                 )
             return failed_ids
+
+    def has_active_task_for_track(self, subscription_id: int, track_spotify_id: str) -> bool:
+        """检查订阅下指定曲目是否已存在处于等待/延迟/下载中的任务，防止巡检重复入队。"""
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT 1 FROM download_tasks
+                WHERE subscription_id = ? AND spotify_id = ?
+                  AND status IN ('delayed', 'pending', 'matching', 'downloading', 'processing', 'tagging')
+                LIMIT 1
+                """,
+                (subscription_id, track_spotify_id),
+            ).fetchone()
+            return row is not None
+
+    def list_due_delayed_tasks(self, now_iso: Optional[str] = None) -> List[Dict[str, Any]]:
+        """获取所有已到达计划执行时间的延迟任务。"""
+        cutoff = now_iso or _now_iso()
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM download_tasks
+                WHERE status = 'delayed' AND execute_after IS NOT NULL AND execute_after <= ?
+                ORDER BY execute_after ASC
+                """,
+                (cutoff,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def mark_delayed_task_pending(self, task_id: str) -> bool:
+        """原子将延迟任务转为 pending 准备执行，返回是否状态变更成功。"""
+        with self._lock, self._connect() as conn:
+            cur = conn.execute(
+                """
+                UPDATE download_tasks
+                SET status = 'pending', execute_after = NULL, updated_at = ?
+                WHERE id = ? AND status = 'delayed'
+                """,
+                (_now_iso(), task_id),
+            )
+            return cur.rowcount > 0

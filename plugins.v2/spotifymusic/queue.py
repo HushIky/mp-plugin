@@ -6,10 +6,12 @@
 
 from __future__ import annotations
 
+import json
 import queue
 import threading
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
@@ -18,6 +20,7 @@ from app.log import logger
 from .db import MusicDatabase
 from .downloader import MusicDownloader
 from .organizer import transfer_to_destination
+from .zh_metadata import enrich_track_zh_metadata
 
 
 @dataclass
@@ -43,6 +46,7 @@ class DownloadQueueManager:
         max_parallel: int = 3,
         download_lyrics: bool = True,
         generate_m3u: bool = False,
+        zh_metadata_match: bool = True,
         proxy: Optional[str] = None,
         on_task_completed: Optional[Callable[[Dict[str, Any], Path], None]] = None,
     ) -> None:
@@ -55,12 +59,14 @@ class DownloadQueueManager:
         self.max_parallel = max(1, int(max_parallel))
         self.download_lyrics = download_lyrics
         self.generate_m3u = generate_m3u
+        self.zh_metadata_match = zh_metadata_match
         self.proxy = proxy
         self.on_task_completed = on_task_completed
 
         self._queue: queue.Queue[Optional[DownloadJob]] = queue.Queue()
         self._semaphore = threading.Semaphore(self.max_parallel)
         self._workers: list[threading.Thread] = []
+        self._scheduler_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         self._running = False
         self._lock = threading.Lock()
@@ -86,6 +92,7 @@ class DownloadQueueManager:
         max_parallel: Optional[int] = None,
         download_lyrics: Optional[bool] = None,
         generate_m3u: Optional[bool] = None,
+        zh_metadata_match: Optional[bool] = None,
         proxy: Optional[str] = None,
     ) -> None:
         """动态更新队列运行参数。"""
@@ -101,6 +108,8 @@ class DownloadQueueManager:
             self.download_lyrics = download_lyrics
         if generate_m3u is not None:
             self.generate_m3u = generate_m3u
+        if zh_metadata_match is not None:
+            self.zh_metadata_match = zh_metadata_match
         if proxy is not None:
             self.proxy = proxy or None
         if max_parallel and max_parallel != self.max_parallel:
@@ -124,6 +133,12 @@ class DownloadQueueManager:
             )
             t.start()
             self._workers.append(t)
+        self._scheduler_thread = threading.Thread(
+            target=self._scheduler_loop,
+            daemon=True,
+            name="SpotifyMusicDelayScheduler",
+        )
+        self._scheduler_thread.start()
         logger.info(f"SpotifyMusic 任务队列已启动，工作线程数: {num_workers}，最大并发数: {self.max_parallel}")
 
     def stop(self) -> None:
@@ -135,6 +150,9 @@ class DownloadQueueManager:
         for t in self._workers:
             t.join(timeout=2.0)
         self._workers.clear()
+        if self._scheduler_thread and self._scheduler_thread.is_alive():
+            self._scheduler_thread.join(timeout=2.0)
+        self._scheduler_thread = None
         logger.info("SpotifyMusic 任务队列已停止")
 
     def submit_track(
@@ -142,8 +160,9 @@ class DownloadQueueManager:
         track_info: Dict[str, Any],
         subscription_id: Optional[int] = None,
         playlist_name: Optional[str] = None,
+        delay_hours: float = 0.0,
     ) -> str:
-        """提交单曲到下载队列。"""
+        """提交单曲到下载队列（支持按小时延迟执行）。"""
         task_id = str(uuid.uuid4())
         title = track_info.get("title") or track_info.get("name") or "Unknown"
         artists = track_info.get("artists") or []
@@ -152,7 +171,16 @@ class DownloadQueueManager:
         cover_url = track_info.get("cover_url") or ""
         spotify_id = track_info.get("spotify_id")
 
-        # 写入数据库记录
+        delay_val = max(0.0, float(delay_hours or 0.0))
+        is_delayed = delay_val > 0
+        execute_after = (
+            (datetime.now(timezone.utc) + timedelta(hours=delay_val)).isoformat()
+            if is_delayed
+            else None
+        )
+        status = "delayed" if is_delayed else "pending"
+
+        # 写入数据库记录（持久化保存完整 track_payload 以便延迟到期或重启后恢复）
         self.db.create_task(
             task_id=task_id,
             title=title,
@@ -161,16 +189,92 @@ class DownloadQueueManager:
             cover_url=cover_url,
             spotify_id=spotify_id,
             subscription_id=subscription_id,
-        )
-
-        job = DownloadJob(
-            task_id=task_id,
-            track_info=track_info,
-            subscription_id=subscription_id,
+            status=status,
+            execute_after=execute_after,
+            track_payload=track_info,
             playlist_name=playlist_name,
         )
-        self._queue.put(job)
+
+        if not is_delayed:
+            job = DownloadJob(
+                task_id=task_id,
+                track_info=track_info,
+                subscription_id=subscription_id,
+                playlist_name=playlist_name,
+            )
+            self._queue.put(job)
         return task_id
+
+    @staticmethod
+    def _restore_track_payload(task: Dict[str, Any]) -> Dict[str, Any]:
+        """从数据库任务记录中恢复完整 track_info 字典。"""
+        raw_payload = task.get("track_payload")
+        if raw_payload:
+            try:
+                parsed = json.loads(raw_payload)
+                if isinstance(parsed, dict):
+                    return parsed
+            except Exception:
+                pass
+        return {
+            "title": task.get("title"),
+            "artist": task.get("artist"),
+            "album": task.get("album"),
+            "cover_url": task.get("cover_url"),
+            "spotify_id": task.get("spotify_id"),
+        }
+
+    def run_delayed_task_now(self, task_id: str) -> bool:
+        """提前立即执行指定延迟任务。"""
+        task = self.db.get_task(task_id)
+        if not task or task.get("status") != "delayed":
+            return False
+        if not self.db.mark_delayed_task_pending(task_id):
+            return False
+        with self._lock:
+            self._cancelled_tasks.discard(task_id)
+        job = DownloadJob(
+            task_id=task_id,
+            track_info=self._restore_track_payload(task),
+            subscription_id=task.get("subscription_id"),
+            playlist_name=task.get("playlist_name"),
+        )
+        self._queue.put(job)
+        return True
+
+    def _dispatch_due_delayed_tasks(self) -> int:
+        """扫描并派发所有已到达执行时间的延迟任务。"""
+        due_tasks = self.db.list_due_delayed_tasks()
+        dispatched = 0
+        for task in due_tasks:
+            task_id = task.get("id")
+            if not task_id:
+                continue
+            with self._lock:
+                if task_id in self._cancelled_tasks:
+                    continue
+            if self.db.mark_delayed_task_pending(task_id):
+                job = DownloadJob(
+                    task_id=task_id,
+                    track_info=self._restore_track_payload(task),
+                    subscription_id=task.get("subscription_id"),
+                    playlist_name=task.get("playlist_name"),
+                )
+                self._queue.put(job)
+                dispatched += 1
+        if dispatched:
+            logger.info(f"SpotifyMusic 延迟调度器已唤醒 {dispatched} 个到期任务进入下载队列")
+        return dispatched
+
+    def _scheduler_loop(self) -> None:
+        """延迟任务定时唤醒循环。"""
+        while self._running and not self._stop_event.is_set():
+            try:
+                self._dispatch_due_delayed_tasks()
+            except Exception as e:
+                logger.debug(f"延迟调度器检查异常: {e}")
+            if self._stop_event.wait(30.0):
+                break
 
     def cancel_task(self, task_id: str) -> bool:
         """取消下载队列中的任务并从数据库删除。"""
@@ -186,17 +290,12 @@ class DownloadQueueManager:
         with self._lock:
             self._cancelled_tasks.discard(task_id)
         self.db.update_task_progress(task_id, status="pending", progress=0.0, speed="", error_msg="")
-        track_info = {
-            "title": task.get("title"),
-            "artist": task.get("artist"),
-            "album": task.get("album"),
-            "cover_url": task.get("cover_url"),
-            "spotify_id": task.get("spotify_id"),
-        }
+        track_info = self._restore_track_payload(task)
         job = DownloadJob(
             task_id=task_id,
             track_info=track_info,
             subscription_id=task.get("subscription_id"),
+            playlist_name=task.get("playlist_name"),
         )
         self._queue.put(job)
         return True
@@ -246,7 +345,13 @@ class DownloadQueueManager:
     def _process_job(self, job: DownloadJob) -> None:
         """执行单个下载与归档任务。"""
         task_id = job.task_id
-        track = job.track_info
+        track = dict(job.track_info)
+        if self.zh_metadata_match:
+            try:
+                enrich_track_zh_metadata(track, proxy=self.proxy)
+            except Exception as e:
+                logger.debug(f"中文元数据交叉匹配异常: {e}")
+
         title = track.get("title") or track.get("name") or "Unknown"
         artist = track.get("artist") or "Unknown"
 
