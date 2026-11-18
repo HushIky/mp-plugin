@@ -282,6 +282,7 @@ class MusicDownloader:
                 duration=duration,
                 proxy=self.proxy,
                 netease_song_id=track_info.get("netease_song_id"),
+                kugou_hash=track_info.get("kugou_hash"),
             )
             # 生成本地独立 .lrc 歌词文件
             if self.save_lrc_file and lyrics_res and lyrics_res.synced:

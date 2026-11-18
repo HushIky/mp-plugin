@@ -20,6 +20,10 @@ from app.log import logger
 _NETEASE_SEARCH_URL = "https://music.163.com/api/search/get/web"
 _NETEASE_ALBUM_URL = "https://music.163.com/api/v1/album/{album_id}"
 _NETEASE_ARTIST_ALBUMS_URL = "https://music.163.com/api/artist/albums/{artist_id}"
+_KUGOU_SINGER_SEARCH_URL = "http://mobilecdn.kugou.com/api/v3/search/singer"
+_KUGOU_SINGER_ALBUMS_URL = "http://mobilecdn.kugou.com/api/v3/singer/album"
+_KUGOU_ALBUM_INFO_URL = "http://mobilecdn.kugou.com/api/v3/album/info"
+_KUGOU_ALBUM_SONGS_URL = "http://mobilecdn.kugou.com/api/v3/album/song"
 _HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -27,14 +31,22 @@ _HEADERS = {
     ),
     "Referer": "https://music.163.com/",
 }
+_KUGOU_HEADERS = {
+    "User-Agent": _HEADERS["User-Agent"],
+}
 
 # 专辑级交叉匹配缓存：key=(album_lower, primary_artist_lower) -> dict 或 None（表示已查过未命中）
 _ALBUM_CACHE: Dict[Tuple[str, str], Optional[Dict[str, Any]]] = {}
+_KUGOU_ALBUM_CACHE: Dict[Tuple[str, str], Optional[Dict[str, Any]]] = {}
 # 歌手近期专辑列表缓存：key=artist_lower -> list[dict]
 _ARTIST_ALBUMS_CACHE: Dict[str, List[Dict[str, Any]]] = {}
-# 歌手 ID 缓存（预置高频 OST 厂牌，避免 163 搜索限流时无法解析）
+_KUGOU_ARTIST_ALBUMS_CACHE: Dict[str, List[Dict[str, Any]]] = {}
+# 歌手 ID 缓存（预置高频 OST 厂牌，避免搜索限流时无法解析）
 _ARTIST_ID_CACHE: Dict[str, int] = {
     "hoyo-mix": 12487174,
+}
+_KUGOU_SINGER_ID_CACHE: Dict[str, int] = {
+    "hoyo-mix": 789658,
 }
 _SEARCH_COOLDOWN_UNTIL: float = 0.0
 _CACHE_LOCK = threading.Lock()
@@ -111,7 +123,9 @@ def clear_album_cache() -> None:
     global _SEARCH_COOLDOWN_UNTIL
     with _CACHE_LOCK:
         _ALBUM_CACHE.clear()
+        _KUGOU_ALBUM_CACHE.clear()
         _ARTIST_ALBUMS_CACHE.clear()
+        _KUGOU_ARTIST_ALBUMS_CACHE.clear()
         _SEARCH_COOLDOWN_UNTIL = 0.0
 
 
@@ -339,8 +353,8 @@ def match_netease_album(
     proxies = {"http": proxy, "https": proxy} if proxy else None
     src_part = _extract_part_number(clean_alb)
     clean_norm = _normalize_text(clean_alb)
-    # 若带系列前缀（如 "Honkai: Star Rail - Let There Be Laughter (Part 1)"），同时提取后半核心段用于子串匹配
-    core_segment = clean_alb.split(" - ", 1)[-1].strip() if " - " in clean_alb else clean_alb
+    # 若带系列前缀（如 "Honkai: Star Rail - Let There Be Laughter (Part 1)"），同时提取最后核心段用于子串匹配
+    core_segment = clean_alb.rsplit(" - ", 1)[-1].strip() if " - " in clean_alb else clean_alb
     core_norm = _normalize_text(core_segment)
 
     matched_album_id: Optional[int] = None
@@ -381,6 +395,225 @@ def match_netease_album(
 
     with _CACHE_LOCK:
         _ALBUM_CACHE[cache_key] = result
+    return result
+
+
+def _get_kugou_artist_recent_albums(
+    artist_name: str,
+    proxies: Optional[Dict[str, str]] = None,
+) -> List[Dict[str, Any]]:
+    """查询并缓存酷狗（TME 共享曲库）艺术家的近期专辑列表，覆盖腾讯音乐首发独占专辑。"""
+    key = artist_name.lower().strip()
+    if not key:
+        return []
+    with _CACHE_LOCK:
+        if key in _KUGOU_ARTIST_ALBUMS_CACHE:
+            return _KUGOU_ARTIST_ALBUMS_CACHE[key]
+        cached_singer_id = _KUGOU_SINGER_ID_CACHE.get(key)
+
+    albums: List[Dict[str, Any]] = []
+    try:
+        singer_id = cached_singer_id
+        if not singer_id:
+            s_resp = requests.get(
+                _KUGOU_SINGER_SEARCH_URL,
+                params={"format": "json", "keyword": artist_name, "page": 1, "pagesize": 5},
+                headers=_KUGOU_HEADERS,
+                proxies=proxies,
+                timeout=8,
+            )
+            if s_resp.status_code == 200:
+                singers = s_resp.json().get("data") or []
+                target_norm = _normalize_text(artist_name)
+                if isinstance(singers, list):
+                    for item in singers:
+                        if not isinstance(item, dict):
+                            continue
+                        if _normalize_text(str(item.get("singername") or "")) == target_norm:
+                            singer_id = item.get("singerid")
+                            break
+                    if not singer_id and singers and isinstance(singers[0], dict):
+                        if _artist_matches(artist_name, [str(singers[0].get("singername") or "")]):
+                            singer_id = singers[0].get("singerid")
+                if singer_id:
+                    with _CACHE_LOCK:
+                        _KUGOU_SINGER_ID_CACHE[key] = int(singer_id)
+
+        if singer_id:
+            alb_resp = requests.get(
+                _KUGOU_SINGER_ALBUMS_URL,
+                params={"format": "json", "singerid": singer_id, "page": 1, "pagesize": 100},
+                headers=_KUGOU_HEADERS,
+                proxies=proxies,
+                timeout=8,
+            )
+            if alb_resp.status_code == 200:
+                raw_list = (alb_resp.json().get("data") or {}).get("info") or []
+                for a in raw_list:
+                    if not isinstance(a, dict):
+                        continue
+                    alb_id = a.get("albumid")
+                    alb_name = str(a.get("albumname") or "").strip()
+                    if not alb_id or not alb_name:
+                        continue
+                    singer_str = str(a.get("singername") or artist_name).strip()
+                    albums.append({
+                        "id": int(alb_id),
+                        "name": alb_name,
+                        "size": int(a.get("songcount") or 0),
+                        "artists": [{"name": x} for x in _split_artists(singer_str) or [artist_name]],
+                        "release_date": str(a.get("publishtime") or "")[:10],
+                    })
+    except Exception as e:
+        logger.debug(f"拉取酷狗歌手专辑列表异常 ({artist_name}): {e}")
+
+    if albums:
+        with _CACHE_LOCK:
+            _KUGOU_ARTIST_ALBUMS_CACHE[key] = albums
+    return albums
+
+
+def _fetch_kugou_album_detail(
+    album_id: int,
+    fallback_name: str = "",
+    fallback_release_date: str = "",
+    proxies: Optional[Dict[str, str]] = None,
+) -> Optional[Dict[str, Any]]:
+    """拉取酷狗专辑详情与全量分页曲目列表。"""
+    try:
+        album_name = fallback_name
+        release_date = fallback_release_date
+        info_resp = requests.get(
+            _KUGOU_ALBUM_INFO_URL,
+            params={"albumid": album_id},
+            headers=_KUGOU_HEADERS,
+            proxies=proxies,
+            timeout=8,
+        )
+        if info_resp.status_code == 200:
+            info_data = info_resp.json().get("data") or {}
+            if isinstance(info_data, dict):
+                album_name = str(info_data.get("albumname") or album_name).strip()
+                pub = str(info_data.get("publishtime") or "").strip()
+                if len(pub) >= 10:
+                    release_date = pub[:10]
+
+        raw_songs: List[Dict[str, Any]] = []
+        for page in range(1, 6):
+            s_resp = requests.get(
+                _KUGOU_ALBUM_SONGS_URL,
+                params={"albumid": album_id, "page": page, "pagesize": 100},
+                headers=_KUGOU_HEADERS,
+                proxies=proxies,
+                timeout=8,
+            )
+            if s_resp.status_code != 200:
+                break
+            s_data = s_resp.json().get("data") or {}
+            page_items = s_data.get("info") or []
+            if not page_items:
+                break
+            raw_songs.extend(page_items)
+            total = int(s_data.get("total") or 0)
+            if total and len(raw_songs) >= total:
+                break
+            if len(page_items) < 100:
+                break
+
+        if not album_name or not raw_songs:
+            return None
+
+        parsed_tracks: List[Dict[str, Any]] = []
+        for idx, s in enumerate(raw_songs, start=1):
+            if not isinstance(s, dict):
+                continue
+            filename = str(s.get("filename") or "").strip()
+            if not filename:
+                continue
+            if " - " in filename:
+                raw_ar, s_name = filename.split(" - ", 1)
+                s_artists = _split_artists(raw_ar)
+            else:
+                s_name = filename
+                s_artists = []
+            s_name = s_name.strip()
+            if not s_name:
+                continue
+            parsed_tracks.append({
+                "id": None,
+                "kugou_hash": str(s.get("hash") or "").strip(),
+                "no": idx,
+                "cd": "1",
+                "name": s_name,
+                "duration_sec": int(s.get("duration") or 0),
+                "artists": s_artists,
+            })
+
+        return {
+            "id": album_id,
+            "source": "kugou",
+            "name": album_name,
+            "release_date": release_date,
+            "tracks": parsed_tracks,
+        }
+    except Exception as e:
+        logger.debug(f"拉取酷狗专辑详情失败 (albumid={album_id}): {e}")
+        return None
+
+
+def match_kugou_album(
+    album: str,
+    artist: str,
+    total_tracks: int = 0,
+    proxy: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """
+    在酷狗音乐（TME 腾讯音乐共享曲库）中匹配中文/双语专辑详情，补齐腾讯音乐首发独占作品。
+    """
+    clean_alb = _clean_album_title(album)
+    primary_artist = _extract_primary_artist(artist)
+    if not clean_alb or not primary_artist:
+        return None
+
+    cache_key = (clean_alb.lower(), primary_artist.lower())
+    with _CACHE_LOCK:
+        if cache_key in _KUGOU_ALBUM_CACHE:
+            return _KUGOU_ALBUM_CACHE[cache_key]
+
+    proxies = {"http": proxy, "https": proxy} if proxy else None
+    src_part = _extract_part_number(clean_alb)
+    clean_norm = _normalize_text(clean_alb)
+    core_segment = clean_alb.rsplit(" - ", 1)[-1].strip() if " - " in clean_alb else clean_alb
+    core_norm = _normalize_text(core_segment)
+
+    matched_cand: Optional[Dict[str, Any]] = None
+    best_score = -1
+
+    for art_name in _split_artists(artist):
+        for cand in _get_kugou_artist_recent_albums(art_name, proxies=proxies):
+            score = _score_album_candidate(cand, artist, core_norm, clean_norm, src_part, total_tracks)
+            if score > best_score:
+                best_score = score
+                matched_cand = cand
+        if matched_cand:
+            break
+
+    result: Optional[Dict[str, Any]] = None
+    if matched_cand:
+        result = _fetch_kugou_album_detail(
+            int(matched_cand["id"]),
+            fallback_name=str(matched_cand.get("name") or ""),
+            fallback_release_date=str(matched_cand.get("release_date") or ""),
+            proxies=proxies,
+        )
+        # 二次校验真实拉取到的曲目数，防止同名 EP/单曲误匹配整张原声带
+        if result and total_tracks:
+            fetched_len = len(result.get("tracks") or [])
+            if fetched_len and fetched_len != total_tracks and abs(fetched_len - total_tracks) > max(3, int(total_tracks * 0.2)):
+                result = None
+
+    with _CACHE_LOCK:
+        _KUGOU_ALBUM_CACHE[cache_key] = result
     return result
 
 
@@ -535,7 +768,7 @@ def enrich_track_zh_metadata(
     track_number = int(track_info.get("track_number") or 0)
     total_tracks = int(track_info.get("total_tracks") or 0)
 
-    # 1. 优先尝试专辑级对齐（同专辑共享缓存，零额外请求）
+    # 1. 优先尝试专辑级对齐（网易云 -> 酷狗/TME 互补，同专辑共享缓存零额外请求）
     if orig_album:
         alb_detail = match_netease_album(
             album=orig_album,
@@ -543,6 +776,13 @@ def enrich_track_zh_metadata(
             total_tracks=total_tracks,
             proxy=proxy,
         )
+        if not alb_detail:
+            alb_detail = match_kugou_album(
+                album=orig_album,
+                artist=artist,
+                total_tracks=total_tracks,
+                proxy=proxy,
+            )
         if alb_detail:
             matched_item = _match_track_in_album(
                 album_detail=alb_detail,
@@ -557,11 +797,14 @@ def enrich_track_zh_metadata(
                     track_info["title"] = matched_item["name"]
                 if matched_item.get("id"):
                     track_info["netease_song_id"] = matched_item["id"]
+                if matched_item.get("kugou_hash"):
+                    track_info["kugou_hash"] = matched_item["kugou_hash"]
             if not track_info.get("release_date") and not track_info.get("year") and alb_detail.get("release_date"):
                 track_info["release_date"] = alb_detail["release_date"]
+            src_label = "酷狗/TME" if alb_detail.get("source") == "kugou" else "网易云"
             if track_info.get("title") != orig_title or track_info.get("album") != orig_album:
                 logger.info(
-                    f"[中文元数据匹配] 专辑对齐成功: '{orig_title}' -> '{track_info.get('title')}' "
+                    f"[中文元数据匹配] {src_label}专辑对齐成功: '{orig_title}' -> '{track_info.get('title')}' "
                     f"| 专辑: '{track_info.get('album')}'"
                 )
             return track_info
