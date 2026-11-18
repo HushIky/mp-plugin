@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 import threading
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
@@ -17,6 +18,7 @@ from app.log import logger
 
 _NETEASE_SEARCH_URL = "https://music.163.com/api/search/get/web"
 _NETEASE_ALBUM_URL = "https://music.163.com/api/v1/album/{album_id}"
+_NETEASE_ARTIST_ALBUMS_URL = "https://music.163.com/api/artist/albums/{artist_id}"
 _HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -27,13 +29,25 @@ _HEADERS = {
 
 # 专辑级交叉匹配缓存：key=(album_lower, primary_artist_lower) -> dict 或 None（表示已查过未命中）
 _ALBUM_CACHE: Dict[Tuple[str, str], Optional[Dict[str, Any]]] = {}
+# 歌手近期专辑列表缓存：key=artist_lower -> list[dict]
+_ARTIST_ALBUMS_CACHE: Dict[str, List[Dict[str, Any]]] = {}
+# 歌手 ID 缓存（预置高频 OST 厂牌，避免 163 搜索限流时无法解析）
+_ARTIST_ID_CACHE: Dict[str, int] = {
+    "hoyo-mix": 12487174,
+}
+_SEARCH_COOLDOWN_UNTIL: float = 0.0
 _CACHE_LOCK = threading.Lock()
 
 _PART_RE = re.compile(r"\b(?:part|pt\.?|vol\.?|volume)\s*(\d+)\b", re.IGNORECASE)
 _CJK_RE = re.compile(r"[\u4e00-\u9fff]")
 _PAREN_SUFFIX_RE = re.compile(
-    r"\s*[\[\(](?:Original\s+(?:Game|Motion\s+Picture|Video\s+Game)?\s*Soundtrack|"
-    r"OST|Deluxe(?:\s+Edition)?|Remastered(?:\s+\d+)?|Explicit)[\]\)]\s*",
+    r"\s*[\[\(][^\[\]\(\)]*?(?:Original\s+(?:Game|Motion\s+Picture|Video\s+Game)?\s*Soundtrack|"
+    r"Game\s+Original\s+Soundtrack|Theme\s+Song|OST|Deluxe(?:\s+Edition)?|"
+    r"Remastered(?:\s+\d+)?|Explicit)[^\[\]\(\)]*?[\]\)]\s*",
+    re.IGNORECASE,
+)
+_TRACK_LANG_SUFFIX_RE = re.compile(
+    r"\s*-\s*(?:Chinese|English|Japanese|Korean|Instrumental|Original)(?:\s+Ver\.?)?\s*$",
     re.IGNORECASE,
 )
 
@@ -61,32 +75,79 @@ def _extract_part_number(text: str) -> Optional[str]:
     return m.group(1) if m else None
 
 
+def _split_artists(artist_str: str) -> List[str]:
+    """将艺术家字符串拆分为独立艺术家列表。"""
+    if not artist_str:
+        return []
+    parts = re.split(r"\s*(?:,|/|、|;|feat\.?|ft\.?)\s*", artist_str.strip(), flags=re.IGNORECASE)
+    return [p.strip() for p in parts if p.strip()]
+
+
 def _extract_primary_artist(artist_str: str) -> str:
     """提取首位主艺术家名称。"""
-    if not artist_str:
-        return ""
-    parts = re.split(r"\s*(?:,|/|、|;|feat\.?|ft\.?)\s*", artist_str.strip(), maxsplit=1, flags=re.IGNORECASE)
-    return parts[0].strip() if parts else artist_str.strip()
+    artists = _split_artists(artist_str)
+    return artists[0] if artists else ""
 
 
-def _artist_matches(primary_artist: str, candidate_artists: List[str]) -> bool:
-    """校验候选艺术家列表是否与主艺术家匹配。"""
-    target = _normalize_text(primary_artist)
-    if not target:
+def _artist_matches(source_artists: str | List[str], candidate_artists: List[str]) -> bool:
+    """校验候选艺术家列表是否与源艺术家列表中任意一位匹配。"""
+    src_list = _split_artists(source_artists) if isinstance(source_artists, str) else list(source_artists)
+    src_norms = [_normalize_text(a) for a in src_list if _normalize_text(a)]
+    if not src_norms:
         return False
     for cand in candidate_artists:
         cand_norm = _normalize_text(cand)
         if not cand_norm:
             continue
-        if target == cand_norm or target in cand_norm or cand_norm in target:
-            return True
+        for target in src_norms:
+            if target == cand_norm or target in cand_norm or cand_norm in target:
+                return True
     return False
 
 
 def clear_album_cache() -> None:
-    """清空专辑缓存（主要用于测试或手动刷新）。"""
+    """清空专辑与歌手缓存（主要用于测试或手动刷新）。"""
+    global _SEARCH_COOLDOWN_UNTIL
     with _CACHE_LOCK:
         _ALBUM_CACHE.clear()
+        _ARTIST_ALBUMS_CACHE.clear()
+        _SEARCH_COOLDOWN_UNTIL = 0.0
+
+
+def _netease_search(
+    query: str,
+    search_type: int,
+    limit: int = 10,
+    proxies: Optional[Dict[str, str]] = None,
+) -> Optional[Dict[str, Any]]:
+    """统一封装网易云搜索请求，内置 405/-460 风控熔断冷却保护。"""
+    global _SEARCH_COOLDOWN_UNTIL
+    now = time.time()
+    if now < _SEARCH_COOLDOWN_UNTIL:
+        return None
+    try:
+        resp = requests.post(
+            _NETEASE_SEARCH_URL,
+            data={"s": query, "type": search_type, "offset": 0, "limit": limit},
+            headers=_HEADERS,
+            proxies=proxies,
+            timeout=8,
+        )
+        if resp.status_code in (405, 429):
+            _SEARCH_COOLDOWN_UNTIL = time.time() + 120.0
+            logger.debug(f"网易云搜索接口触发 HTTP {resp.status_code} 限流，进入 120s 冷却")
+            return None
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        if data.get("code") in (405, -460, 429):
+            _SEARCH_COOLDOWN_UNTIL = time.time() + 120.0
+            logger.debug(f"网易云搜索接口返回业务限流 code={data.get('code')}，进入 120s 冷却")
+            return None
+        return data
+    except Exception as e:
+        logger.debug(f"网易云搜索请求异常 ({query}): {e}")
+        return None
 
 
 def _fetch_netease_album_detail(album_id: int, proxies: Optional[Dict[str, str]] = None) -> Optional[Dict[str, Any]]:
@@ -140,6 +201,106 @@ def _fetch_netease_album_detail(album_id: int, proxies: Optional[Dict[str, str]]
         return None
 
 
+def _get_artist_recent_albums(
+    artist_name: str,
+    proxies: Optional[Dict[str, str]] = None,
+) -> List[Dict[str, Any]]:
+    """查询并缓存网易云艺术家的近期专辑列表，解决英文拼接搜索易漏检及搜索限流问题。"""
+    key = artist_name.lower().strip()
+    if not key:
+        return []
+    with _CACHE_LOCK:
+        if key in _ARTIST_ALBUMS_CACHE:
+            return _ARTIST_ALBUMS_CACHE[key]
+        cached_artist_id = _ARTIST_ID_CACHE.get(key)
+
+    albums: List[Dict[str, Any]] = []
+    try:
+        artist_id = cached_artist_id
+        if not artist_id:
+            data = _netease_search(artist_name, search_type=100, limit=5, proxies=proxies)
+            if data:
+                artists = data.get("result", {}).get("artists") or []
+                target_norm = _normalize_text(artist_name)
+                for a in artists:
+                    if _normalize_text(str(a.get("name") or "")) == target_norm:
+                        artist_id = a.get("id")
+                        break
+                if not artist_id and artists:
+                    artist_id = artists[0].get("id")
+                if artist_id:
+                    with _CACHE_LOCK:
+                        _ARTIST_ID_CACHE[key] = int(artist_id)
+
+        if artist_id:
+            alb_resp = requests.get(
+                _NETEASE_ARTIST_ALBUMS_URL.format(artist_id=artist_id),
+                params={"limit": 100},
+                headers=_HEADERS,
+                proxies=proxies,
+                timeout=8,
+            )
+            if alb_resp.status_code == 200:
+                albums = alb_resp.json().get("hotAlbums") or []
+    except Exception as e:
+        logger.debug(f"拉取网易云歌手专辑列表异常 ({artist_name}): {e}")
+
+    if albums:
+        with _CACHE_LOCK:
+            _ARTIST_ALBUMS_CACHE[key] = albums
+    return albums
+
+
+def _score_album_candidate(
+    cand: Dict[str, Any],
+    artist: str,
+    core_norm: str,
+    clean_norm: str,
+    src_part: Optional[str],
+    total_tracks: int,
+) -> int:
+    """对网易云候选专辑进行置信度评分，不满足严格条件返回 -1。"""
+    if not isinstance(cand, dict):
+        return -1
+    cand_name = str(cand.get("name") or "").strip()
+    if not cand_name or not cand.get("id"):
+        return -1
+
+    cand_artists = [
+        str(a.get("name") or "").strip()
+        for a in (cand.get("artists") or ([cand.get("artist")] if cand.get("artist") else []))
+        if isinstance(a, dict) and a.get("name")
+    ]
+    if cand_artists and not _artist_matches(artist, cand_artists):
+        return -1
+
+    cand_part = _extract_part_number(cand_name)
+    if src_part and cand_part and src_part != cand_part:
+        return -1
+    if src_part and not cand_part:
+        return -1
+
+    cand_norm = _normalize_text(cand_name)
+    title_hit = (
+        (core_norm and core_norm in cand_norm)
+        or (clean_norm and clean_norm in cand_norm)
+    )
+    if not title_hit:
+        return -1
+
+    cand_size = int(cand.get("size") or 0)
+    if total_tracks and cand_size:
+        if cand_size != total_tracks and abs(cand_size - total_tracks) > max(3, int(total_tracks * 0.2)):
+            return -1
+
+    score = 100
+    if _contains_cjk(cand_name):
+        score += 20
+    if total_tracks and cand_size and cand_size == total_tracks:
+        score += 30
+    return score
+
+
 def match_netease_album(
     album: str,
     artist: str,
@@ -166,74 +327,37 @@ def match_netease_album(
     core_segment = clean_alb.split(" - ", 1)[-1].strip() if " - " in clean_alb else clean_alb
     core_norm = _normalize_text(core_segment)
 
-    query_candidates = [f"{core_segment} {primary_artist}".strip()]
-    if core_segment != clean_alb:
-        query_candidates.append(f"{clean_alb} {primary_artist}".strip())
-
     matched_album_id: Optional[int] = None
     best_score = -1
 
-    for q in query_candidates:
-        try:
-            resp = requests.post(
-                _NETEASE_SEARCH_URL,
-                data={"s": q, "type": 10, "offset": 0, "limit": 10},
-                headers=_HEADERS,
-                proxies=proxies,
-                timeout=8,
-            )
-            if resp.status_code != 200:
+    # 1. 优先从任一已知/缓存艺术家的近期专辑列表匹配（几乎零风控且高命中）
+    for art_name in _split_artists(artist):
+        for cand in _get_artist_recent_albums(art_name, proxies=proxies):
+            score = _score_album_candidate(cand, artist, core_norm, clean_norm, src_part, total_tracks)
+            if score > best_score:
+                best_score = score
+                matched_album_id = int(cand["id"])
+        if matched_album_id:
+            break
+
+    # 2. 若未在歌手近期专辑列表中找到（如冷门/老专辑），再使用网易云搜索接口
+    if not matched_album_id:
+        query_candidates = [core_segment]
+        if core_segment != clean_alb:
+            query_candidates.append(clean_alb)
+
+        for q in query_candidates:
+            data = _netease_search(q, search_type=10, limit=10, proxies=proxies)
+            if not data:
                 continue
-            albums = resp.json().get("result", {}).get("albums") or []
+            albums = data.get("result", {}).get("albums") or []
             for cand in albums:
-                if not isinstance(cand, dict):
-                    continue
-                cand_name = str(cand.get("name") or "").strip()
-                cand_id = cand.get("id")
-                if not cand_name or not cand_id:
-                    continue
-
-                cand_artists = [
-                    str(a.get("name") or "").strip()
-                    for a in (cand.get("artists") or [])
-                    if isinstance(a, dict) and a.get("name")
-                ]
-                if not _artist_matches(primary_artist, cand_artists):
-                    continue
-
-                # 严格校验分卷编号（如 Part 1 / Part 2 / Part 3）
-                cand_part = _extract_part_number(cand_name)
-                if src_part and cand_part and src_part != cand_part:
-                    continue
-                if src_part and not cand_part:
-                    continue
-
-                cand_norm = _normalize_text(cand_name)
-                title_hit = (
-                    (core_norm and core_norm in cand_norm)
-                    or (clean_norm and clean_norm in cand_norm)
-                )
-                if not title_hit:
-                    continue
-
-                score = 100
-                if _contains_cjk(cand_name):
-                    score += 20
-                cand_size = int(cand.get("size") or 0)
-                if total_tracks and cand_size:
-                    if cand_size == total_tracks:
-                        score += 30
-                    elif abs(cand_size - total_tracks) > max(3, int(total_tracks * 0.2)):
-                        continue
-
+                score = _score_album_candidate(cand, artist, core_norm, clean_norm, src_part, total_tracks)
                 if score > best_score:
                     best_score = score
-                    matched_album_id = int(cand_id)
-
+                    matched_album_id = int(cand["id"])
             if matched_album_id:
                 break
-        except Exception as e:
-            logger.debug(f"检索网易云专辑异常 ({q}): {e}")
 
     result: Optional[Dict[str, Any]] = None
     if matched_album_id:
@@ -256,6 +380,8 @@ def _match_track_in_album(
         return None
 
     title_norm = _normalize_text(title)
+    base_title_norm = _normalize_text(_TRACK_LANG_SUFFIX_RE.sub("", title or ""))
+    title_words = {w for w in title_norm.split() if w not in ("the", "a", "an", "of", "in", "on", "to")}
     best_name: Optional[str] = None
     best_score = 0
 
@@ -268,17 +394,23 @@ def _match_track_in_album(
         ne_dur = int(item.get("duration_sec") or 0)
 
         english_hit = bool(title_norm and title_norm in ne_norm)
+        base_english_hit = bool(base_title_norm and base_title_norm in ne_norm)
+        ne_words = set(ne_norm.split())
+        fuzzy_words_hit = bool(title_words and len(title_words) >= 2 and title_words.issubset(ne_words))
         no_hit = bool(track_number and ne_no == track_number)
         dur_diff = abs(ne_dur - duration) if (duration and ne_dur) else None
 
         # 安全校验：
-        # 1) 英文原名明确包含在网易云双语曲名中，且时长无严重冲突
-        # 2) 纯中文曲名则要求曲号严格一致且时长误差 <= 3s
-        if english_hit:
+        # 1) 英文原名或核心实词明确包含在网易云双语曲名中，且时长无严重冲突
+        # 2) 去语言后缀的主标题命中且曲号一致、时长差 <= 4s
+        # 3) 纯中文或伴奏等非英文对应曲名，要求曲号严格一致且时长误差 <= 4s
+        if english_hit or fuzzy_words_hit:
             if dur_diff is not None and dur_diff > 6:
                 continue
-            score = 100 + (20 if no_hit else 0) + (10 if _contains_cjk(ne_name) else 0)
-        elif no_hit and dur_diff is not None and dur_diff <= 3 and _contains_cjk(ne_name):
+            score = (100 if english_hit else 90) + (20 if no_hit else 0) + (10 if _contains_cjk(ne_name) else 0)
+        elif base_english_hit and no_hit and (dur_diff is None or dur_diff <= 4):
+            score = 92 + (10 if _contains_cjk(ne_name) else 0)
+        elif no_hit and dur_diff is not None and dur_diff <= 4 and _contains_cjk(ne_name):
             score = 85
         else:
             continue
@@ -308,17 +440,11 @@ def match_netease_single(
     src_has_cover = any(kw in title_norm for kw in ("cover", "remix", "live"))
 
     try:
-        resp = requests.post(
-            _NETEASE_SEARCH_URL,
-            data={"s": f"{title} {primary_artist}".strip(), "type": 1, "offset": 0, "limit": 10},
-            headers=_HEADERS,
-            proxies=proxies,
-            timeout=8,
-        )
-        if resp.status_code != 200:
+        data = _netease_search(f"{title} {primary_artist}".strip(), search_type=1, limit=10, proxies=proxies)
+        if not data:
             return None
 
-        songs = resp.json().get("result", {}).get("songs") or []
+        songs = data.get("result", {}).get("songs") or []
         for s in songs:
             if not isinstance(s, dict):
                 continue
