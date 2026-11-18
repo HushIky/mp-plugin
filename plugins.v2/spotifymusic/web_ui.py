@@ -10,8 +10,10 @@ def render_music_workbench_html(
     plugin_name: str = "Spotify 音乐工作台",
     api_prefix: str = "/api/v1/plugin/SpotifyMusic",
     default_token: str = "",
+    version: str = "",
 ) -> str:
     """生成内嵌 Vue 3 与 TailwindCSS 的单页交互界面 HTML。"""
+    ver_badge = f"v{version.lstrip('v')}" if version else "dev"
     return f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -62,7 +64,7 @@ def render_music_workbench_html(
         <div>
           <h1 class="text-xl font-bold tracking-tight text-white flex items-center gap-2">
             Spotify 音乐搜索与订阅工作台
-            <span class="text-xs font-normal px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">v1.1.13</span>
+            <span class="text-xs font-normal px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">{ver_badge}</span>
           </h1>
           <p class="text-xs text-slate-400">高品质音频下载 • 元数据/歌词/封面打标 • 增量订阅管理</p>
         </div>

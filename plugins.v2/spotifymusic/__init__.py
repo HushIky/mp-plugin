@@ -37,7 +37,7 @@ class SpotifyMusic(_PluginBase):
     plugin_name = "Spotify音乐下载与订阅"
     plugin_desc = "支持 Spotify 链接解析、音乐搜索、歌单/艺术家增量订阅、元数据标签/封面/歌词内嵌与目录自动整理。"
     plugin_icon = "spotifymusic.png"
-    plugin_version = "1.1.20"
+    plugin_version = "1.1.21"
     plugin_label = "音乐管理"
     plugin_author = "local"
     plugin_order = 10
@@ -779,7 +779,10 @@ class SpotifyMusic(_PluginBase):
         """返回内置独立音乐搜索工作台 HTML。"""
         api_token = self._get_api_token()
         return HTMLResponse(
-            content=render_music_workbench_html(default_token=api_token)
+            content=render_music_workbench_html(
+                default_token=api_token,
+                version=self.plugin_version,
+            )
         )
 
     def api_search_query(

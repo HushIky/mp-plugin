@@ -281,6 +281,7 @@ class MusicDownloader:
                 album=search_album,
                 duration=duration,
                 proxy=self.proxy,
+                netease_song_id=track_info.get("netease_song_id"),
             )
             # 生成本地独立 .lrc 歌词文件
             if self.save_lrc_file and lyrics_res and lyrics_res.synced:

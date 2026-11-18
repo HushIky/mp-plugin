@@ -196,6 +196,7 @@ def _fetch_netease_album_detail(album_id: int, proxies: Optional[Dict[str, str]]
                 if isinstance(a, dict) and a.get("name")
             ]
             parsed_tracks.append({
+                "id": s.get("id"),
                 "no": s_no,
                 "cd": s_cd,
                 "name": s_name,
@@ -388,8 +389,8 @@ def _match_track_in_album(
     title: str,
     track_number: int = 0,
     duration: int = 0,
-) -> Optional[str]:
-    """在已匹配的网易云专辑曲目列表中精准对齐单曲，返回网易云元标题。"""
+) -> Optional[Dict[str, Any]]:
+    """在已匹配的网易云专辑曲目列表中精准对齐单曲，返回匹配到的网易云曲目字典（含 id 与 name）。"""
     tracks = album_detail.get("tracks") or []
     if not tracks:
         return None
@@ -397,7 +398,7 @@ def _match_track_in_album(
     title_norm = _normalize_text(title)
     base_title_norm = _normalize_text(_TRACK_LANG_SUFFIX_RE.sub("", title or ""))
     title_words = {w for w in title_norm.split() if w not in ("the", "a", "an", "of", "in", "on", "to")}
-    best_name: Optional[str] = None
+    best_item: Optional[Dict[str, Any]] = None
     best_score = 0
 
     for item in tracks:
@@ -432,9 +433,9 @@ def _match_track_in_album(
 
         if score > best_score:
             best_score = score
-            best_name = ne_name
+            best_item = item
 
-    return best_name
+    return best_item
 
 
 def match_netease_single(
@@ -492,6 +493,7 @@ def match_netease_single(
             alb_obj = s.get("album") or {}
             alb_name = str(alb_obj.get("name") or "").strip()
             return {
+                "song_id": s.get("id"),
                 "title": s_name,
                 "album": alb_name,
                 "release_date": _parse_publish_time(alb_obj.get("publishTime")),
@@ -542,7 +544,7 @@ def enrich_track_zh_metadata(
             proxy=proxy,
         )
         if alb_detail:
-            matched_track_name = _match_track_in_album(
+            matched_item = _match_track_in_album(
                 album_detail=alb_detail,
                 title=orig_title,
                 track_number=track_number,
@@ -550,8 +552,11 @@ def enrich_track_zh_metadata(
             )
             if _contains_cjk(alb_detail.get("name", "")):
                 track_info["album"] = alb_detail["name"]
-            if matched_track_name:
-                track_info["title"] = matched_track_name
+            if matched_item:
+                if matched_item.get("name"):
+                    track_info["title"] = matched_item["name"]
+                if matched_item.get("id"):
+                    track_info["netease_song_id"] = matched_item["id"]
             if not track_info.get("release_date") and not track_info.get("year") and alb_detail.get("release_date"):
                 track_info["release_date"] = alb_detail["release_date"]
             if track_info.get("title") != orig_title or track_info.get("album") != orig_album:
@@ -570,6 +575,8 @@ def enrich_track_zh_metadata(
     )
     if single_res:
         track_info["title"] = single_res["title"]
+        if single_res.get("song_id"):
+            track_info["netease_song_id"] = single_res["song_id"]
         if single_res.get("album") and _contains_cjk(single_res["album"]):
             track_info["album"] = single_res["album"]
         if not track_info.get("release_date") and not track_info.get("year") and single_res.get("release_date"):
