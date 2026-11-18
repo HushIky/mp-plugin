@@ -37,7 +37,7 @@ class SpotifyMusic(_PluginBase):
     plugin_name = "Spotify音乐下载与订阅"
     plugin_desc = "支持 Spotify 链接解析、音乐搜索、歌单/艺术家增量订阅、元数据标签/封面/歌词内嵌与目录自动整理。"
     plugin_icon = "spotifymusic.png"
-    plugin_version = "1.1.24"
+    plugin_version = "1.1.25"
     plugin_label = "音乐管理"
     plugin_author = "local"
     plugin_order = 10
@@ -124,7 +124,7 @@ class SpotifyMusic(_PluginBase):
         )
 
         if self._enabled:
-            self._queue_mgr.start(num_workers=2)
+            self._queue_mgr.start(num_workers=max(2, self._max_parallel))
 
         # 检查是否在保存设置时提交了手动添加链接
         add_url = str(config.get("add_spotify_url") or "").strip()
@@ -768,8 +768,16 @@ class SpotifyMusic(_PluginBase):
                 "endpoint": self.api_run_delayed_task_now,
                 "methods": ["POST"],
                 "auth": "bear",
-                "summary": "立即执行延迟任务",
-                "description": "跳过延迟等待，立即将指定延迟任务排入下载队列",
+                "summary": "立即执行任务",
+                "description": "跳过延迟等待或唤醒滞留 pending 任务，立即排入下载队列",
+            },
+            {
+                "path": "/tasks/resume_pending",
+                "endpoint": self.api_resume_pending_tasks,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "唤醒滞留排队任务",
+                "description": "扫描并恢复所有滞留在 pending 状态的未入队任务",
             },
         ]
 
@@ -1074,7 +1082,7 @@ class SpotifyMusic(_PluginBase):
         return {"success": True, "message": f"已重新排队 {requeued_count} 个失败任务"}
 
     def api_run_delayed_task_now(self, task_id: str) -> Dict[str, Any]:
-        """跳过延迟等待，立即执行指定延迟任务。"""
+        """跳过延迟等待或重新唤醒滞留的 pending 任务，立即执行。"""
         if not self._db or not self._queue_mgr:
             return {"success": False, "message": "插件尚未初始化"}
         task = self._db.get_task(task_id)
@@ -1082,8 +1090,17 @@ class SpotifyMusic(_PluginBase):
             return {"success": False, "message": "任务不存在"}
         ok = self._queue_mgr.run_delayed_task_now(task_id)
         if ok:
-            return {"success": True, "message": f"已将延迟任务《{task.get('title', task_id)}》立即推入下载队列"}
-        return {"success": False, "message": "当前任务非延迟等待状态或调度失败"}
+            return {"success": True, "message": f"已将任务《{task.get('title', task_id)}》立即推入下载队列"}
+        return {"success": False, "message": "当前任务状态不支持唤醒或已在执行中"}
+
+    def api_resume_pending_tasks(self) -> Dict[str, Any]:
+        """一键扫描并恢复所有滞留未入队的排队任务。"""
+        if not self._db or not self._queue_mgr:
+            return {"success": False, "message": "插件尚未初始化"}
+        recovered = self._queue_mgr.recover_unfinished_tasks(reset_interrupted=False)
+        if recovered > 0:
+            return {"success": True, "message": f"已成功唤醒并恢复 {recovered} 个滞留排队任务"}
+        return {"success": True, "message": "所有排队任务均已在工作线程队列中正常排队"}
 
     # ==================== 后台调度与同步逻辑 ====================
 

@@ -768,6 +768,16 @@ def render_music_workbench_html(
         </div>
         <div class="flex items-center gap-2 flex-wrap">
           <button 
+            v-if="pendingTaskCount > 0"
+            @click="resumePendingTasks" 
+            :disabled="resumingPending"
+            class="px-3 py-2 rounded-xl bg-emerald-950/60 hover:bg-emerald-900/80 border border-emerald-800 text-xs text-emerald-300 transition flex items-center gap-1.5"
+            title="扫描并重新唤醒可能滞留的排队任务"
+          >
+            <i class="fa-solid fa-bolt" :class="{{ 'fa-spin': resumingPending }}"></i>
+            唤醒排队 ({{{{ pendingTaskCount }}}})
+          </button>
+          <button 
             v-if="failedTaskCount > 0"
             @click="retryFailedTasks" 
             :disabled="retryingFailed"
@@ -855,14 +865,14 @@ def render_music_workbench_html(
 
             <div class="flex items-center gap-1.5 flex-shrink-0">
               <button 
-                v-if="task.status === 'delayed'"
+                v-if="task.status === 'delayed' || task.status === 'pending'"
                 @click="runDelayedNow(task)"
                 :disabled="runningNowMap[task.id]"
                 class="px-2 py-1 rounded-lg bg-indigo-950/50 hover:bg-indigo-900/70 text-indigo-300 hover:text-white border border-indigo-700/60 transition text-[11px] flex items-center gap-1"
-                title="跳过延迟等待，立即下载此任务"
+                :title="task.status === 'delayed' ? '跳过延迟等待，立即下载此任务' : '重新唤醒并执行此排队任务'"
               >
                 <i class="fa-solid fa-play" :class="{{ 'fa-spin': runningNowMap[task.id] }}"></i>
-                <span>立即下载</span>
+                <span>{{{{ task.status === 'delayed' ? '立即下载' : '唤醒' }}}}</span>
               </button>
 
               <button 
@@ -1347,12 +1357,16 @@ def render_music_workbench_html(
         const clearingCompleted = ref(false);
         const clearingFailed = ref(false);
         const retryingFailed = ref(false);
+        const resumingPending = ref(false);
         const deletingTaskMap = ref({{}});
         const retryingTaskMap = ref({{}});
         const runningNowMap = ref({{}});
 
         const activeTaskCount = computed(() => {{
           return tasks.value.filter(t => t.status === 'pending' || t.status === 'delayed' || t.status === 'downloading' || t.status === 'tagging' || t.status === 'matching' || t.status === 'processing').length;
+        }});
+        const pendingTaskCount = computed(() => {{
+          return tasks.value.filter(t => t.status === 'pending').length;
         }});
         const completedTaskCount = computed(() => {{
           return tasks.value.filter(t => t.status === 'completed').length;
@@ -1412,6 +1426,19 @@ def render_music_workbench_html(
             showToast('重试失败: ' + e.message, 'error');
           }} finally {{
             retryingFailed.value = false;
+          }}
+        }};
+
+        const resumePendingTasks = async () => {{
+          resumingPending.value = true;
+          try {{
+            const res = await request('/tasks/resume_pending', {{ method: 'POST' }});
+            showToast(res.message || '已检查并唤醒排队任务');
+            fetchTasks();
+          }} catch (e) {{
+            showToast('唤醒失败: ' + e.message, 'error');
+          }} finally {{
+            resumingPending.value = false;
           }}
         }};
 
@@ -1584,16 +1611,19 @@ def render_music_workbench_html(
           clearingCompleted,
           clearingFailed,
           retryingFailed,
+          resumingPending,
           deletingTaskMap,
           retryingTaskMap,
           runningNowMap,
           activeTaskCount,
+          pendingTaskCount,
           completedTaskCount,
           failedTaskCount,
           fetchTasks,
           clearCompletedTasks,
           clearFailedTasks,
           retryFailedTasks,
+          resumePendingTasks,
           deleteTask,
           retryTask,
           runDelayedNow,

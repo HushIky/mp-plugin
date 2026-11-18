@@ -24,21 +24,39 @@ try:
 except ImportError:
     _HAS_YTMUSICAPI = False
 
-_ytm_instance: Optional[YTMusic] = None
+_ytm_instances: Dict[str, YTMusic] = {}
 
 
-def get_ytm_client() -> Optional[YTMusic]:
-    """获取单例 YTMusic 客户端。"""
-    global _ytm_instance
+class _TimeoutSession(requests.Session):
+    """带默认超时时间的 requests.Session，防止 YTMusic 在半开连接或无代理环境下无限挂起工作线程。"""
+
+    def request(self, method: str, url: str, **kwargs: Any) -> requests.Response:
+        kwargs.setdefault("timeout", 12)
+        return super().request(method, url, **kwargs)
+
+
+def get_ytm_client(proxy: Optional[str] = None) -> Optional[YTMusic]:
+    """获取绑定代理与强制超时的 YTMusic 客户端。"""
     if not _HAS_YTMUSICAPI:
         return None
-    if _ytm_instance is None:
+    cache_key = (proxy or "").strip()
+    if cache_key not in _ytm_instances:
         try:
-            _ytm_instance = YTMusic()
+            session = _TimeoutSession()
+            proxies = {"http": cache_key, "https": cache_key} if cache_key else None
+            if proxies:
+                session.proxies.update(proxies)
+            _ytm_instances[cache_key] = YTMusic(requests_session=session, proxies=proxies)
+        except TypeError:
+            try:
+                _ytm_instances[cache_key] = YTMusic()
+            except Exception as e:
+                logger.debug(f"初始化 YTMusic 客户端失败: {e}")
+                return None
         except Exception as e:
             logger.debug(f"初始化 YTMusic 客户端失败: {e}")
             return None
-    return _ytm_instance
+    return _ytm_instances.get(cache_key)
 
 
 def _clean_string(text: str) -> str:
@@ -103,7 +121,7 @@ def match_youtube_track(
     :return: (video_id, matched_title) 或 None
     """
     query = f"{artist} - {title}".strip()
-    ytm = get_ytm_client()
+    ytm = get_ytm_client(proxy=proxy)
 
     # 优先使用 YouTube Music 官方搜索
     if ytm:
@@ -139,6 +157,8 @@ def match_youtube_track(
         'extract_flat': 'in_playlist',
         'skip_download': True,
         'noplaylist': True,
+        'socket_timeout': 15,
+        'retries': 2,
     }
     if proxy:
         ydl_opts['proxy'] = proxy
@@ -347,7 +367,7 @@ def search_music_all(
         logger.debug(f"Spotify 全分类搜索跳过: {e}")
 
     # 2. 默认零配置回退：YouTube Music 全分类搜索
-    ytm = get_ytm_client()
+    ytm = get_ytm_client(proxy=proxy)
     if ytm:
         try:
             tracks: List[Dict[str, Any]] = []
@@ -458,6 +478,8 @@ def search_music_all(
             "extract_flat": "in_playlist",
             "skip_download": True,
             "noplaylist": True,
+            "socket_timeout": 15,
+            "retries": 2,
         }
         if proxy:
             ydl_opts["proxy"] = proxy

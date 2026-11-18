@@ -71,6 +71,7 @@ class DownloadQueueManager:
         self._running = False
         self._lock = threading.Lock()
         self._cancelled_tasks: set[str] = set()
+        self._enqueued_tasks: set[str] = set()
         self._downloader = self._build_downloader()
 
     def _build_downloader(self) -> MusicDownloader:
@@ -118,13 +119,59 @@ class DownloadQueueManager:
 
         self._downloader = self._build_downloader()
 
-    def start(self, num_workers: int = 2) -> None:
-        """启动后台工作线程。"""
+    def _enqueue_job(self, job: DownloadJob) -> bool:
+        """线程安全地将任务推入内存队列，自动拦截已在队列或执行中的重复任务。"""
+        with self._lock:
+            if job.task_id in self._enqueued_tasks:
+                return False
+            self._enqueued_tasks.add(job.task_id)
+        self._queue.put(job)
+        return True
+
+    def recover_unfinished_tasks(self, reset_interrupted: bool = False) -> int:
+        """
+        从数据库恢复因容器重启、插件更新或重载而滞留在数据库中的未完成任务（pending 及中断的进行中任务）。
+        """
+        tasks = (
+            self.db.list_unfinished_tasks()
+            if reset_interrupted
+            else self.db.list_tasks(status="pending", limit=500)
+        )
+        if not reset_interrupted:
+            tasks = list(reversed(tasks))
+
+        recovered = 0
+        for task in tasks:
+            task_id = task.get("id")
+            if not task_id:
+                continue
+            with self._lock:
+                if task_id in self._cancelled_tasks or task_id in self._enqueued_tasks:
+                    continue
+            st = task.get("status")
+            if reset_interrupted and st in ("matching", "downloading", "processing", "tagging"):
+                self.db.update_task_progress(task_id, status="pending", progress=0.0, speed="", error_msg="")
+            job = DownloadJob(
+                task_id=task_id,
+                track_info=self._restore_track_payload(task),
+                subscription_id=task.get("subscription_id"),
+                playlist_name=task.get("playlist_name"),
+            )
+            if self._enqueue_job(job):
+                recovered += 1
+
+        if recovered:
+            logger.info(f"SpotifyMusic 已从数据库自动恢复并唤醒 {recovered} 个未完成排队任务")
+        return recovered
+
+    def start(self, num_workers: Optional[int] = None) -> None:
+        """启动后台工作线程并自动恢复数据库中滞留的未完成任务。"""
         if self._running:
             return
+        worker_count = max(2, int(num_workers or self.max_parallel))
         self._running = True
         self._stop_event.clear()
-        for i in range(num_workers):
+        for i in range(worker_count):
             t = threading.Thread(
                 target=self._worker_loop,
                 args=(i,),
@@ -133,13 +180,17 @@ class DownloadQueueManager:
             )
             t.start()
             self._workers.append(t)
+        try:
+            self.recover_unfinished_tasks(reset_interrupted=True)
+        except Exception as e:
+            logger.error(f"启动恢复未完成任务异常: {e}")
         self._scheduler_thread = threading.Thread(
             target=self._scheduler_loop,
             daemon=True,
             name="SpotifyMusicDelayScheduler",
         )
         self._scheduler_thread.start()
-        logger.info(f"SpotifyMusic 任务队列已启动，工作线程数: {num_workers}，最大并发数: {self.max_parallel}")
+        logger.info(f"SpotifyMusic 任务队列已启动，工作线程数: {worker_count}，最大并发数: {self.max_parallel}")
 
     def stop(self) -> None:
         """停止队列并清理工作线程。"""
@@ -153,6 +204,8 @@ class DownloadQueueManager:
         if self._scheduler_thread and self._scheduler_thread.is_alive():
             self._scheduler_thread.join(timeout=2.0)
         self._scheduler_thread = None
+        with self._lock:
+            self._enqueued_tasks.clear()
         logger.info("SpotifyMusic 任务队列已停止")
 
     def submit_track(
@@ -202,7 +255,7 @@ class DownloadQueueManager:
                 subscription_id=subscription_id,
                 playlist_name=playlist_name,
             )
-            self._queue.put(job)
+            self._enqueue_job(job)
         return task_id
 
     @staticmethod
@@ -225,12 +278,17 @@ class DownloadQueueManager:
         }
 
     def run_delayed_task_now(self, task_id: str) -> bool:
-        """提前立即执行指定延迟任务。"""
+        """提前立即执行指定延迟任务，或手动重新唤醒滞留的 pending 任务。"""
         task = self.db.get_task(task_id)
-        if not task or task.get("status") != "delayed":
+        if not task:
             return False
-        if not self.db.mark_delayed_task_pending(task_id):
+        st = task.get("status")
+        if st == "delayed":
+            if not self.db.mark_delayed_task_pending(task_id):
+                return False
+        elif st != "pending":
             return False
+
         with self._lock:
             self._cancelled_tasks.discard(task_id)
         job = DownloadJob(
@@ -239,7 +297,7 @@ class DownloadQueueManager:
             subscription_id=task.get("subscription_id"),
             playlist_name=task.get("playlist_name"),
         )
-        self._queue.put(job)
+        self._enqueue_job(job)
         return True
 
     def _dispatch_due_delayed_tasks(self) -> int:
@@ -260,17 +318,18 @@ class DownloadQueueManager:
                     subscription_id=task.get("subscription_id"),
                     playlist_name=task.get("playlist_name"),
                 )
-                self._queue.put(job)
-                dispatched += 1
+                if self._enqueue_job(job):
+                    dispatched += 1
         if dispatched:
             logger.info(f"SpotifyMusic 延迟调度器已唤醒 {dispatched} 个到期任务进入下载队列")
         return dispatched
 
     def _scheduler_loop(self) -> None:
-        """延迟任务定时唤醒循环。"""
+        """延迟任务定时唤醒与滞留 pending 任务自愈循环。"""
         while self._running and not self._stop_event.is_set():
             try:
                 self._dispatch_due_delayed_tasks()
+                self.recover_unfinished_tasks(reset_interrupted=False)
             except Exception as e:
                 logger.debug(f"延迟调度器检查异常: {e}")
             if self._stop_event.wait(30.0):
@@ -280,6 +339,7 @@ class DownloadQueueManager:
         """取消下载队列中的任务并从数据库删除。"""
         with self._lock:
             self._cancelled_tasks.add(task_id)
+            self._enqueued_tasks.discard(task_id)
         return self.db.delete_task(task_id)
 
     def requeue_task(self, task_id: str) -> bool:
@@ -297,7 +357,7 @@ class DownloadQueueManager:
             subscription_id=task.get("subscription_id"),
             playlist_name=task.get("playlist_name"),
         )
-        self._queue.put(job)
+        self._enqueue_job(job)
         return True
 
     def _worker_loop(self, worker_id: int) -> None:
@@ -312,33 +372,32 @@ class DownloadQueueManager:
                 if job is None:
                     break
 
-                with self._lock:
-                    if job.task_id in self._cancelled_tasks:
-                        self._cancelled_tasks.discard(job.task_id)
-                        self._queue.task_done()
-                        continue
-
-                # 检查数据库中任务是否已被删除
-                task = self.db.get_task(job.task_id)
-                if not task:
-                    self._queue.task_done()
-                    continue
-
-                with self._semaphore:
-                    # 再次校验是否在等待信号量期间被取消
+                try:
                     with self._lock:
                         if job.task_id in self._cancelled_tasks:
                             self._cancelled_tasks.discard(job.task_id)
-                            self._queue.task_done()
                             continue
+
+                    # 检查数据库中任务是否已被删除
                     task = self.db.get_task(job.task_id)
                     if not task:
-                        self._queue.task_done()
                         continue
 
-                    self._process_job(job)
+                    with self._semaphore:
+                        # 再次校验是否在等待信号量期间被取消
+                        with self._lock:
+                            if job.task_id in self._cancelled_tasks:
+                                self._cancelled_tasks.discard(job.task_id)
+                                continue
+                        task = self.db.get_task(job.task_id)
+                        if not task:
+                            continue
 
-                self._queue.task_done()
+                        self._process_job(job)
+                finally:
+                    with self._lock:
+                        self._enqueued_tasks.discard(job.task_id)
+                    self._queue.task_done()
             except Exception as e:
                 logger.error(f"工作线程 #{worker_id} 处理异常: {e}")
 

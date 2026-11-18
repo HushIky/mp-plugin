@@ -449,3 +449,15 @@ class MusicDatabase:
                 (_now_iso(), task_id),
             )
             return cur.rowcount > 0
+
+    def list_unfinished_tasks(self) -> List[Dict[str, Any]]:
+        """查询所有尚未完成（pending 或重启前中断的进行中状态）的任务，按创建时间升序返回以便恢复队列。"""
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM download_tasks
+                WHERE status IN ('pending', 'matching', 'downloading', 'processing', 'tagging')
+                ORDER BY created_at ASC
+                """
+            ).fetchall()
+            return [dict(r) for r in rows]
