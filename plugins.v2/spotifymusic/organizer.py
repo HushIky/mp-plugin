@@ -21,30 +21,41 @@ def sanitize_path_part(text: str) -> str:
     return safe or 'Unknown'
 
 
+_PRIORITY_ARTISTS = ("HOYO-MiX",)
+
+
 def extract_primary_artist(val: Any) -> str:
     """
     从艺术家字段或列表中提取第一位/主艺术家名称（用于目录与文件名路径模板渲染）。
 
-    支持传入 list/tuple（取第一个有效元素）、单个字符串（支持英文/中文逗号、分号、斜杠、顿号、feat/ft 等多艺术家分隔符拆分后取第一位）。
+    支持传入 list/tuple、单个字符串（支持英文/中文逗号、分号、斜杠、顿号、feat/ft 等多艺术家分隔符拆分）。
+    若艺术家中包含优先指定厂牌/艺术家（如 HOYO-MiX），则优先归类为该名称。
     """
     if not val:
         return ""
+
+    candidates: list[str] = []
     if isinstance(val, (list, tuple, set)):
         for item in val:
             if item and str(item).strip():
-                return extract_primary_artist(str(item).strip())
+                parts = re.split(r'[,，;；/、]|\s+(?:feat\.?|ft\.?)\s+', str(item).strip(), flags=re.IGNORECASE)
+                candidates.extend(p.strip() for p in parts if p.strip())
+    else:
+        text = str(val).strip()
+        if text:
+            parts = re.split(r'[,，;；/、]|\s+(?:feat\.?|ft\.?)\s+', text, flags=re.IGNORECASE)
+            candidates.extend(p.strip() for p in parts if p.strip())
+
+    if not candidates:
         return ""
 
-    text = str(val).strip()
-    if not text:
-        return ""
+    for pri in _PRIORITY_ARTISTS:
+        pri_lower = pri.lower()
+        for c in candidates:
+            if c.lower() == pri_lower:
+                return pri
 
-    parts = re.split(r'[,，;；/、]|\s+(?:feat\.?|ft\.?)\s+', text, flags=re.IGNORECASE)
-    for p in parts:
-        cleaned = p.strip()
-        if cleaned:
-            return cleaned
-    return text
+    return candidates[0]
 
 
 def build_relative_path(template: str, track_info: Dict[str, Any], ext: str) -> Path:
