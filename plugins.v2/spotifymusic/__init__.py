@@ -5,6 +5,11 @@
 
 from __future__ import annotations
 
+import importlib
+import os
+import shutil
+import subprocess
+import sys
 import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -37,11 +42,20 @@ class SpotifyMusic(_PluginBase):
     plugin_name = "Spotify音乐下载与订阅"
     plugin_desc = "支持 Spotify 链接解析、音乐搜索、歌单/艺术家增量订阅、元数据标签/封面/歌词内嵌与目录自动整理。"
     plugin_icon = "spotifymusic.png"
-    plugin_version = "1.1.25"
+    plugin_version = "1.1.26"
     plugin_label = "音乐管理"
     plugin_author = "local"
     plugin_order = 10
     auth_level = 1
+
+    @staticmethod
+    def _get_ytdlp_version() -> str:
+        """读取当前运行环境已加载的 yt-dlp 版本号。"""
+        try:
+            import yt_dlp
+            return str(getattr(yt_dlp.version, "__version__", "") or "未知")
+        except Exception:
+            return "未安装"
 
     def _get_api_token(self) -> str:
         """获取 MoviePilot 系统的 API Token。"""
@@ -607,7 +621,8 @@ class SpotifyMusic(_PluginBase):
                     {
                         "component": "VCardText",
                         "text": (
-                            f"【运行状态】已激活订阅: {len(subs)} 个 | 进行中任务: {len(active_tasks)} 个 | 已完成: {len(completed_tasks)} 条 | 失败: {len(failed_tasks)} 条\n\n"
+                            f"【运行状态】已激活订阅: {len(subs)} 个 | 进行中任务: {len(active_tasks)} 个 | 已完成: {len(completed_tasks)} 条 | 失败: {len(failed_tasks)} 条\n"
+                            f"【内核版本】插件 v{self.plugin_version} | yt-dlp: {self._get_ytdlp_version()}\n\n"
                             f"【已订阅的歌单与艺术家】\n{subs_summary}\n\n"
                             f"【最近任务动态】\n{tasks_summary}"
                         ),
@@ -779,6 +794,14 @@ class SpotifyMusic(_PluginBase):
                 "summary": "唤醒滞留排队任务",
                 "description": "扫描并恢复所有滞留在 pending 状态的未入队任务",
             },
+            {
+                "path": "/system/upgrade_ytdlp",
+                "endpoint": self.api_upgrade_ytdlp,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "在线升级 yt-dlp",
+                "description": "升级运行环境中的 yt-dlp 至 PyPI 最新版本并热重载模块",
+            },
         ]
 
     # ==================== API 路由处理逻辑 ====================
@@ -790,6 +813,7 @@ class SpotifyMusic(_PluginBase):
             content=render_music_workbench_html(
                 default_token=api_token,
                 version=self.plugin_version,
+                ytdlp_version=self._get_ytdlp_version(),
             )
         )
 
@@ -1101,6 +1125,59 @@ class SpotifyMusic(_PluginBase):
         if recovered > 0:
             return {"success": True, "message": f"已成功唤醒并恢复 {recovered} 个滞留排队任务"}
         return {"success": True, "message": "所有排队任务均已在工作线程队列中正常排队"}
+
+    def api_upgrade_ytdlp(self) -> Dict[str, Any]:
+        """在线升级容器环境内的 yt-dlp 并热重载到下载器与匹配器。"""
+        old_ver = self._get_ytdlp_version()
+        py_bin = Path(sys.executable)
+        uv_name = "uv.exe" if os.name == "nt" else "uv"
+        sibling_uv = py_bin.with_name(uv_name)
+        uv_bin = str(sibling_uv) if sibling_uv.exists() else shutil.which("uv")
+
+        env = os.environ.copy()
+        if self._proxy:
+            for k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+                env[k] = self._proxy
+
+        commands: List[List[str]] = []
+        if uv_bin:
+            commands.append([uv_bin, "pip", "install", "--python", str(py_bin), "-U", "yt-dlp"])
+        commands.append([str(py_bin), "-m", "pip", "install", "-U", "yt-dlp"])
+
+        last_err = ""
+        upgraded = False
+        for cmd in commands:
+            try:
+                proc = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=120, check=False)
+                if proc.returncode == 0:
+                    upgraded = True
+                    break
+                last_err = (proc.stderr or proc.stdout or f"exit {proc.returncode}").strip()[-300:]
+            except Exception as e:
+                last_err = str(e)
+
+        if not upgraded:
+            return {"success": False, "message": f"升级 yt-dlp 失败: {last_err}"}
+
+        try:
+            for mod_name in [m for m in list(sys.modules) if m == "yt_dlp" or m.startswith("yt_dlp.")]:
+                sys.modules.pop(mod_name, None)
+            new_ytdlp = importlib.import_module("yt_dlp")
+            from . import downloader as dl_mod
+            dl_mod.yt_dlp = new_ytdlp
+            dl_mod._HAS_YTDLP = True
+            matcher.yt_dlp = new_ytdlp
+            matcher._HAS_YTDLP = True
+        except Exception as e:
+            logger.warning(f"[{self.plugin_name}] 热重载 yt_dlp 模块异常: {e}")
+
+        new_ver = self._get_ytdlp_version()
+        logger.info(f"[{self.plugin_name}] yt-dlp 升级完成: {old_ver} -> {new_ver}")
+        return {
+            "success": True,
+            "data": {"old_version": old_ver, "version": new_ver},
+            "message": f"yt-dlp 已更新至最新版本: {new_ver}" if new_ver != old_ver else f"yt-dlp 已是最新版本 ({new_ver})",
+        }
 
     # ==================== 后台调度与同步逻辑 ====================
 

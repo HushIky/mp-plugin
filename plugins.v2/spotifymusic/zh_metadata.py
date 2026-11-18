@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 import threading
 import time
+import unicodedata
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -22,6 +23,7 @@ _NETEASE_ALBUM_URL = "https://music.163.com/api/v1/album/{album_id}"
 _NETEASE_ARTIST_ALBUMS_URL = "https://music.163.com/api/artist/albums/{artist_id}"
 _KUGOU_SINGER_SEARCH_URL = "http://mobilecdn.kugou.com/api/v3/search/singer"
 _KUGOU_SINGER_ALBUMS_URL = "http://mobilecdn.kugou.com/api/v3/singer/album"
+_KUGOU_ALBUM_SEARCH_URL = "http://mobilecdn.kugou.com/api/v3/search/album"
 _KUGOU_ALBUM_INFO_URL = "http://mobilecdn.kugou.com/api/v3/album/info"
 _KUGOU_ALBUM_SONGS_URL = "http://mobilecdn.kugou.com/api/v3/album/song"
 _HEADERS = {
@@ -46,25 +48,63 @@ _KUGOU_ARTIST_ALBUMS_CACHE: Dict[str, List[Dict[str, Any]]] = {}
 # 歌手 ID 缓存（预置高频 OST 厂牌，避免搜索限流时无法解析）
 _ARTIST_ID_CACHE: Dict[str, int] = {
     "hoyo-mix": 12487174,
+    "sān-z": 94007859,
+    "san-z": 94007859,
+    "三z-studio": 94007859,
 }
 _KUGOU_SINGER_ID_CACHE: Dict[str, int] = {
     "hoyo-mix": 789658,
+}
+# 跨语种厂牌/歌手同义词映射（如 Spotify 的 Sān-Z 对应国内平台的三Z-STUDIO）
+_ARTIST_ALIAS_MAP: Dict[str, List[str]] = {
+    "san z": ["三z studio"],
+    "三z studio": ["san z"],
+    "yu peng chen": ["陈致逸"],
+    "陈致逸": ["yu peng chen"],
+    "robin": ["知更鸟"],
+    "知更鸟": ["robin"],
 }
 _SEARCH_COOLDOWN_UNTIL: float = 0.0
 _CACHE_LOCK = threading.Lock()
 
 _PART_RE = re.compile(r"\b(?:part|pt\.?|vol\.?|volume)\s*(\d+)\b", re.IGNORECASE)
 _CJK_RE = re.compile(r"[\u4e00-\u9fff]")
+_KANA_RE = re.compile(r"[\u3040-\u30ff]")
+_INSTRUMENTAL_RE = re.compile(
+    r"(?:\b(?:instrumental|inst\.?|off\s*vocal|karaoke|backing\s*track)\b|伴奏|纯音乐)",
+    re.IGNORECASE,
+)
+_NON_SUBTITLE_EN_RE = re.compile(
+    r"\b(?:original|game|motion|picture|video|soundtrack|ost|ep|mix|ver|version|vol|volume|part|pt|deluxe|edition|remastered)\b",
+    re.IGNORECASE,
+)
+_LATIN_WORD_RE = re.compile(r"[a-zA-Z]{2,}")
+_SERIES_PREFIX_RE = re.compile(
+    r"^(?:genshin\s+impact|honkai(?:\s*:\s*|\s+)star\s+rail|honkai\s+impact\s+3rd|tears\s+of\s+themis|zenless\s+zone\s+zero)\s*[-:：]\s*",
+    re.IGNORECASE,
+)
 _PAREN_SUFFIX_RE = re.compile(
     r"\s*[\[\(][^\[\]\(\)]*?(?:Original\s+(?:Game|Motion\s+Picture|Video\s+Game)?\s*Soundtrack|"
-    r"Game\s+Original\s+Soundtrack|Theme\s+Song|OST|Deluxe(?:\s+Edition)?|"
+    r"Game\s+Original\s+Soundtrack|(?:Theme|Trailer|Character|Promotional|Concept)\s+Song|"
+    r"Animated\s+Short[^\[\]\(\)]*?Theme|Impressions|OST|Deluxe(?:\s+Edition)?|"
     r"Remastered(?:\s+\d+)?|Explicit)[^\[\]\(\)]*?[\]\)]\s*",
     re.IGNORECASE,
 )
 _TRACK_LANG_SUFFIX_RE = re.compile(
-    r"\s*-\s*(?:Chinese|English|Japanese|Korean|Instrumental|Original)(?:\s+Ver\.?)?\s*$",
+    r"\s*-\s*(?:Chinese|English|Japanese|Korean|Instrumental|Original)(?:\s+(?:Ver\.?|Version))?\s*$",
     re.IGNORECASE,
 )
+_TRACK_OST_SUFFIX_RE = re.compile(
+    r"\s*-\s*.*?(?:Original\s+(?:Game\s+)?Soundtrack(?:\s+EP)?|\bOST\b|Opening\s+Theme|Animated\s+Short).*$",
+    re.IGNORECASE,
+)
+
+
+def _strip_track_suffix(title: str) -> str:
+    """剥离曲名尾部附带的原声带专辑名或语种版本后缀，提取核心曲名。"""
+    cleaned = _TRACK_OST_SUFFIX_RE.sub("", title or "")
+    cleaned = _TRACK_LANG_SUFFIX_RE.sub("", cleaned)
+    return cleaned.strip()
 
 
 def _contains_cjk(text: str) -> bool:
@@ -72,9 +112,43 @@ def _contains_cjk(text: str) -> bool:
     return bool(_CJK_RE.search(text or ""))
 
 
+def _contains_kana(text: str) -> bool:
+    """判断文本中是否包含日文平假名或片假名。"""
+    return bool(_KANA_RE.search(text or ""))
+
+
+def _is_already_zh(text: str) -> bool:
+    """判断文本是否已是中文命名（含汉字且不含日文假名）。"""
+    return _contains_cjk(text) and not _contains_kana(text)
+
+
+def _is_instrumental_title(text: str) -> bool:
+    """判断曲名是否为伴奏/纯音乐版本，防止人声版与伴奏版互相串位。"""
+    return bool(_INSTRUMENTAL_RE.search(text or ""))
+
+
+def _has_english_subtitle(text: str) -> bool:
+    """判断中文专辑名是否自带实质英文副标题（排除 OST/Original Soundtrack 等通用后缀）。"""
+    stripped = _NON_SUBTITLE_EN_RE.sub(" ", _PAREN_SUFFIX_RE.sub(" ", text or ""))
+    return len(_LATIN_WORD_RE.findall(stripped)) >= 2
+
+
+def _fold_latin_diacritics(text: str) -> str:
+    """仅折叠拉丁字母音标（如 Sān-Z -> San-Z），不影响日文浊音假名与汉字。"""
+    out: List[str] = []
+    for ch in text:
+        if "\u00c0" <= ch <= "\u024f":
+            folded = unicodedata.normalize("NFKD", ch).encode("ascii", "ignore").decode("ascii")
+            out.append(folded or ch)
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
 def _normalize_text(text: str) -> str:
-    """规范化文本以便模糊比对（转小写、去除多余标点与空白）。"""
-    cleaned = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", " ", (text or "").lower())
+    """规范化文本以便模糊比对（折叠拉丁音标、转小写、保留中日文字符并去除标点空白）。"""
+    folded = _fold_latin_diacritics(unicodedata.normalize("NFKC", text or "")).lower()
+    cleaned = re.sub(r"[^a-z0-9\u3040-\u30ff\u4e00-\u9fff]+", " ", folded)
     return re.sub(r"\s+", " ", cleaned).strip()
 
 
@@ -82,6 +156,43 @@ def _clean_album_title(album: str) -> str:
     """清理专辑标题中的原声带/版本后缀以便搜索匹配。"""
     text = _PAREN_SUFFIX_RE.sub(" ", album or "")
     return re.sub(r"\s+", " ", text).strip()
+
+
+def _extract_core_segment(clean_alb: str) -> str:
+    """剥离游戏系列前缀（兼容有无空格的连字符或冒号），提取核心专辑名。"""
+    stripped = _SERIES_PREFIX_RE.sub("", clean_alb or "").strip()
+    if " - " in stripped:
+        stripped = stripped.rsplit(" - ", 1)[-1].strip()
+    return stripped or clean_alb
+
+
+def _detect_franchise(album_text: str, artist_text: str = "") -> Optional[str]:
+    """识别专辑所属游戏 IP 系列，用于纯中文指纹匹配时严格防跨游戏串台。"""
+    combined = f"{album_text or ''} {artist_text or ''}".lower()
+    norm_artist = _normalize_text(artist_text)
+    if "tears of themis" in combined or "未定事件簿" in combined:
+        return "tot"
+    if "zenless zone zero" in combined or "绝区零" in combined or "san z" in norm_artist or "三z studio" in norm_artist:
+        return "zzz"
+    if "star rail" in combined or "星穹铁道" in combined:
+        return "hsr"
+    if "honkai impact" in combined or "崩坏3" in combined or "崩壊3rd" in combined:
+        return "hi3"
+    if "genshin" in combined or "原神" in combined:
+        return "gi"
+    return None
+
+
+def _days_between_dates(d1: str, d2: str) -> Optional[int]:
+    """计算两个 YYYY-MM-DD 日期字符串之间的绝对天数差。"""
+    try:
+        if len(d1) >= 10 and len(d2) >= 10:
+            dt1 = datetime.strptime(d1[:10], "%Y-%m-%d")
+            dt2 = datetime.strptime(d2[:10], "%Y-%m-%d")
+            return abs((dt1 - dt2).days)
+    except Exception:
+        pass
+    return None
 
 
 def _extract_part_number(text: str) -> Optional[str]:
@@ -104,10 +215,32 @@ def _extract_primary_artist(artist_str: str) -> str:
     return artists[0] if artists else ""
 
 
+def _pick_search_artist(artist_str: str) -> str:
+    """选择最适合国内音乐平台搜索关键字的艺术家名（优先通用厂牌或国内登记名）。"""
+    artists = _split_artists(artist_str)
+    if not artists:
+        return ""
+    for a in artists:
+        if a.lower() == "hoyo-mix":
+            return "HOYO-MiX"
+    first = artists[0]
+    if _normalize_text(first) == "san z":
+        return "三Z-STUDIO"
+    return first
+
+
 def _artist_matches(source_artists: str | List[str], candidate_artists: List[str]) -> bool:
-    """校验候选艺术家列表是否与源艺术家列表中任意一位匹配。"""
+    """校验候选艺术家列表是否与源艺术家列表中任意一位（含跨语种同义名）匹配。"""
     src_list = _split_artists(source_artists) if isinstance(source_artists, str) else list(source_artists)
-    src_norms = [_normalize_text(a) for a in src_list if _normalize_text(a)]
+    src_norms: List[str] = []
+    for a in src_list:
+        norm = _normalize_text(a)
+        if not norm:
+            continue
+        src_norms.append(norm)
+        for alias in _ARTIST_ALIAS_MAP.get(norm, ()):
+            if alias not in src_norms:
+                src_norms.append(alias)
     if not src_norms:
         return False
     for cand in candidate_artists:
@@ -267,15 +400,23 @@ def _get_artist_recent_albums(
                         _ARTIST_ID_CACHE[key] = int(artist_id)
 
         if artist_id:
-            alb_resp = requests.get(
-                _NETEASE_ARTIST_ALBUMS_URL.format(artist_id=artist_id),
-                params={"limit": 100},
-                headers=_HEADERS,
-                proxies=proxies,
-                timeout=8,
-            )
-            if alb_resp.status_code == 200:
-                albums = alb_resp.json().get("hotAlbums") or []
+            offset = 0
+            for _ in range(4):
+                alb_resp = requests.get(
+                    _NETEASE_ARTIST_ALBUMS_URL.format(artist_id=artist_id),
+                    params={"offset": offset, "limit": 200},
+                    headers=_HEADERS,
+                    proxies=proxies,
+                    timeout=8,
+                )
+                if alb_resp.status_code != 200:
+                    break
+                payload = alb_resp.json()
+                page_items = payload.get("hotAlbums") or []
+                albums.extend(page_items)
+                if not payload.get("more") or not page_items:
+                    break
+                offset += len(page_items)
     except Exception as e:
         logger.debug(f"拉取网易云歌手专辑列表异常 ({artist_name}): {e}")
 
@@ -358,7 +499,7 @@ def match_netease_album(
     src_part = _extract_part_number(clean_alb)
     clean_norm = _normalize_text(clean_alb)
     # 若带系列前缀（如 "Honkai: Star Rail - Let There Be Laughter (Part 1)"），同时提取最后核心段用于子串匹配
-    core_segment = clean_alb.rsplit(" - ", 1)[-1].strip() if " - " in clean_alb else clean_alb
+    core_segment = _extract_core_segment(clean_alb)
     core_norm = _normalize_text(core_segment)
 
     matched_album_id: Optional[int] = None
@@ -587,7 +728,7 @@ def match_kugou_album(
     proxies = {"http": proxy, "https": proxy} if proxy else None
     src_part = _extract_part_number(clean_alb)
     clean_norm = _normalize_text(clean_alb)
-    core_segment = clean_alb.rsplit(" - ", 1)[-1].strip() if " - " in clean_alb else clean_alb
+    core_segment = _extract_core_segment(clean_alb)
     core_norm = _normalize_text(core_segment)
 
     matched_cand: Optional[Dict[str, Any]] = None
@@ -601,6 +742,43 @@ def match_kugou_album(
                 matched_cand = cand
         if matched_cand:
             break
+
+    # 若酷狗歌手页仅收录部分专辑（如同名歌手分流），回退调用免限流酷狗专辑搜索接口
+    if not matched_cand:
+        search_ar = _pick_search_artist(artist)
+        for q in (f"{core_segment} {search_ar}".strip(), core_segment):
+            if not q:
+                continue
+            try:
+                s_resp = requests.get(
+                    _KUGOU_ALBUM_SEARCH_URL,
+                    params={"format": "json", "keyword": q, "page": 1, "pagesize": 15},
+                    headers=_KUGOU_HEADERS,
+                    proxies=proxies,
+                    timeout=8,
+                )
+                if s_resp.status_code != 200:
+                    continue
+                raw_albs = (s_resp.json().get("data") or {}).get("info") or []
+                for a in raw_albs:
+                    if not isinstance(a, dict) or not a.get("albumid") or not a.get("albumname"):
+                        continue
+                    singer_str = str(a.get("singername") or "").strip()
+                    cand = {
+                        "id": int(a["albumid"]),
+                        "name": str(a["albumname"]).strip(),
+                        "size": int(a.get("songcount") or 0),
+                        "artists": [{"name": x} for x in _split_artists(singer_str)] if singer_str else [],
+                        "release_date": str(a.get("publishtime") or "")[:10],
+                    }
+                    score = _score_album_candidate(cand, artist, core_norm, clean_norm, src_part, total_tracks)
+                    if score > best_score:
+                        best_score = score
+                        matched_cand = cand
+                if matched_cand:
+                    break
+            except Exception as e:
+                logger.debug(f"检索酷狗专辑异常 ({q}): {e}")
 
     result: Optional[Dict[str, Any]] = None
     if matched_cand:
@@ -653,18 +831,25 @@ def _probe_pure_zh_album_by_track(
     sample_title: str,
     duration: int = 0,
     total_tracks: int = 0,
+    track_number: int = 0,
+    release_date: str = "",
     proxy: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """
     针对国内平台采用纯中文命名（不含英文原专辑名，如《崩坏3-于未来彼端回眸》对应
     《Looking Back from Beyond the Future》）的原声带：
-    从该艺术家的近期中文专辑中筛选曲目数相近的候选，通过首曲英文原名精确命中反推整张专辑并缓存，
+    1) 优先通过专辑内双语/英文曲名精确反推整张专辑；
+    2) 若国内专辑与曲目均为 100% 纯中文（如《未定事件簿OST》、《绝区零-极限委托2.0》及纯中文 EP），
+       在同艺术家 + 同游戏 IP 防护下，结合精确曲目数、发行日期邻近度与首曲时长（±2s）指纹对齐。
     全程仅使用免限流 GET 详情接口，不依赖易 405 限流的搜索接口。
     """
     clean_alb = _clean_album_title(album)
     primary_artist = _extract_primary_artist(artist)
-    title_norm = _normalize_text(_TRACK_LANG_SUFFIX_RE.sub("", sample_title or ""))
-    if not clean_alb or not primary_artist or len(title_norm) < 5:
+    core_segment = _extract_core_segment(clean_alb)
+    alb_title_norm = _normalize_text(core_segment)
+    title_norm = _normalize_text(_strip_track_suffix(sample_title or ""))
+    has_fingerprint_inputs = bool(duration > 0 and total_tracks > 0 and (total_tracks >= 8 or len(release_date) >= 10))
+    if not clean_alb or not primary_artist or (len(title_norm) < 5 and len(alb_title_norm) < 8 and not has_fingerprint_inputs):
         return None
 
     cache_key = (clean_alb.lower(), primary_artist.lower())
@@ -674,11 +859,11 @@ def _probe_pure_zh_album_by_track(
 
     proxies = {"http": proxy, "https": proxy} if proxy else None
     src_part = _extract_part_number(clean_alb)
-    core_segment = clean_alb.rsplit(" - ", 1)[-1].strip() if " - " in clean_alb else clean_alb
     base_no_part_norm = _normalize_text(_PART_RE.sub("", core_segment))
+    src_franchise = _detect_franchise(album, artist)
 
     def _collect_candidates(raw_albums: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        filtered: List[Tuple[int, Dict[str, Any]]] = []
+        filtered: List[Tuple[int, int, int, Dict[str, Any]]] = []
         for cand in raw_albums:
             if not isinstance(cand, dict) or not cand.get("id"):
                 continue
@@ -689,34 +874,48 @@ def _probe_pure_zh_album_by_track(
             if src_part and cand_part and src_part != cand_part:
                 continue
             cand_norm = _normalize_text(cand_name)
-            # 兼容海外按 Vol 分卷而国内合入同一总集专辑的情况（如 Footprints of the Traveler, Vol. 5 -> 原神-流星的轨迹 Footprints of the Traveler）
+            cand_size = int(cand.get("size") or 0)
+            # 兼容海外分卷（含无 Vol.1 标注的首卷）而国内合入同一总集专辑的情况（如 Footprints of the Traveler -> 原神-流星的轨迹 Footprints of the Traveler）
             is_umbrella_series = bool(
-                src_part and not cand_part and len(base_no_part_norm) >= 6 and base_no_part_norm in cand_norm
+                not cand_part
+                and len(base_no_part_norm) >= 10
+                and base_no_part_norm in cand_norm
+                and (src_part is not None or (total_tracks and cand_size >= total_tracks * 2))
             )
             if src_part and not cand_part and not is_umbrella_series:
                 continue
-            cand_size = int(cand.get("size") or 0)
             if is_umbrella_series:
                 diff = -10
             elif total_tracks and cand_size:
-                diff = abs(cand_size - total_tracks)
-                if diff > max(3, int(total_tracks * 0.25)):
-                    continue
+                # 兼容 Spotify Embed 100 首截断上限（如 Hyper Commission 2.0 在 Embed 返回 100 首而全专实际 109/198 首）
+                if total_tracks == 100 and cand_size >= 100:
+                    diff = 0
+                else:
+                    diff = abs(cand_size - total_tracks)
+                    if diff > max(3, int(total_tracks * 0.25)):
+                        continue
             else:
                 diff = 50
-            filtered.append((diff, cand))
-        filtered.sort(key=lambda pair: pair[0])
-        return [c for _, c in filtered[:6]]
+            cand_rel_date = str(cand.get("release_date") or "")[:10] or _parse_publish_time(cand.get("publishTime"))
+            days_gap = _days_between_dates(release_date, cand_rel_date) if (release_date and cand_rel_date) else None
+            date_rank = days_gap if days_gap is not None else 9999
+            # 纯中文命名专辑排在已含不匹配英文副标题的双语专辑之前，同曲数下按发行日期最接近优先
+            has_en_sub = 0 if is_umbrella_series else (1 if _has_english_subtitle(cand_name) else 0)
+            filtered.append((diff, has_en_sub, date_rank, cand))
+        filtered.sort(key=lambda item: (item[0], item[1], item[2]))
+        return [c for _, _, _, c in filtered[:15]]
 
     def _detail_has_exact_track(detail: Optional[Dict[str, Any]]) -> bool:
         if not detail:
             return False
         for item in detail.get("tracks") or []:
             ne_name = str(item.get("name") or "")
-            if not _contains_cjk(ne_name):
+            if not ne_name:
                 continue
             ne_norm = _normalize_text(ne_name)
-            if title_norm not in ne_norm:
+            track_hit = len(title_norm) >= 5 and title_norm in ne_norm
+            alb_track_hit = len(alb_title_norm) >= 8 and alb_title_norm in ne_norm
+            if not (track_hit or alb_track_hit):
                 continue
             ne_dur = int(item.get("duration_sec") or 0)
             if duration and ne_dur and abs(ne_dur - duration) > 5:
@@ -724,11 +923,61 @@ def _probe_pure_zh_album_by_track(
             return True
         return False
 
-    matched_detail: Optional[Dict[str, Any]] = None
+    def _detail_matches_pure_zh_fingerprint(cand: Dict[str, Any], detail: Optional[Dict[str, Any]]) -> bool:
+        """针对专辑名与曲名均为纯中文的发行，基于同 IP、曲目数、发行日期与对应曲号 ±2s 时长指纹严格校验。"""
+        if not detail or not has_fingerprint_inputs:
+            return False
+        cand_name = str(detail.get("name") or cand.get("name") or "")
+        if _has_english_subtitle(cand_name):
+            return False
+        cand_franchise = _detect_franchise(cand_name)
+        if src_franchise and cand_franchise and src_franchise != cand_franchise:
+            return False
+        # 若源专辑明确属于某 IP（如未定事件簿/绝区零），纯中文指纹候选也必须归属同一 IP
+        if src_franchise and not cand_franchise:
+            return False
 
-    # 1. 先探测网易云艺术家近期纯中文候选专辑
+        tracks = detail.get("tracks") or []
+        cand_size = len(tracks) or int(cand.get("size") or 0)
+        if total_tracks == 100:
+            if cand_size < 100:
+                return False
+        elif total_tracks <= 7:
+            if cand_size != total_tracks:
+                return False
+        else:
+            if abs(cand_size - total_tracks) > 1:
+                return False
+
+        cand_date = str(detail.get("release_date") or cand.get("release_date") or "")[:10] or _parse_publish_time(cand.get("publishTime"))
+        days_gap = _days_between_dates(release_date, cand_date) if (release_date and cand_date) else None
+        if total_tracks <= 7:
+            # 短 EP/单曲必须同时满足发行日期高度邻近（<= 14 天），杜绝同曲数短单曲误撞时长
+            if days_gap is None or days_gap > 14:
+                return False
+        elif days_gap is not None and days_gap > 45 and src_franchise != "tot":
+            # 多曲目 OST 允许海内外发行排期差（未定事件簿国际服存在约一年排期差）
+            return False
+
+        target_no = track_number if track_number > 0 else 1
+        for item in tracks:
+            if int(item.get("no") or 0) != target_no:
+                continue
+            ne_name = str(item.get("name") or "")
+            if not _contains_cjk(ne_name) or _has_english_subtitle(ne_name):
+                return False
+            ne_dur = int(item.get("duration_sec") or 0)
+            if ne_dur and abs(ne_dur - duration) <= 2:
+                return True
+        return False
+
+    matched_detail: Optional[Dict[str, Any]] = None
+    all_source_candidates: List[Tuple[str, Dict[str, Any]]] = []
+
+    # 第 1 轮：优先通过英文/双语曲名精确命中反推（网易云 -> 酷狗/TME）
     for art_name in _split_artists(artist):
         for cand in _collect_candidates(_get_artist_recent_albums(art_name, proxies=proxies)):
+            all_source_candidates.append(("netease", cand))
             detail = _get_cached_album_detail("netease", int(cand["id"]), proxies=proxies)
             if _detail_has_exact_track(detail):
                 matched_detail = detail
@@ -736,10 +985,10 @@ def _probe_pure_zh_album_by_track(
         if matched_detail:
             break
 
-    # 2. 再探测酷狗/TME 艺术家近期纯中文候选专辑
     if not matched_detail:
         for art_name in _split_artists(artist):
             for cand in _collect_candidates(_get_kugou_artist_recent_albums(art_name, proxies=proxies)):
+                all_source_candidates.append(("kugou", cand))
                 detail = _get_cached_album_detail(
                     "kugou",
                     int(cand["id"]),
@@ -751,6 +1000,25 @@ def _probe_pure_zh_album_by_track(
                     matched_detail = detail
                     break
             if matched_detail:
+                break
+
+    # 第 2 轮：纯中文无英文对照专辑指纹匹配（复用已缓存详情，零额外重复请求）
+    if not matched_detail and has_fingerprint_inputs:
+        seen_ids = set()
+        for src_name, cand in all_source_candidates:
+            cid = (src_name, int(cand["id"]))
+            if cid in seen_ids:
+                continue
+            seen_ids.add(cid)
+            detail = _get_cached_album_detail(
+                src_name,
+                int(cand["id"]),
+                fallback_name=str(cand.get("name") or ""),
+                fallback_release_date=str(cand.get("release_date") or ""),
+                proxies=proxies,
+            )
+            if _detail_matches_pure_zh_fingerprint(cand, detail):
+                matched_detail = detail
                 break
 
     with _CACHE_LOCK:
@@ -775,8 +1043,20 @@ def _match_track_in_album(
         return None
 
     title_norm = _normalize_text(title)
-    base_title_norm = _normalize_text(_TRACK_LANG_SUFFIX_RE.sub("", title or ""))
+    base_title_norm = _normalize_text(_strip_track_suffix(title or ""))
     title_words = {w for w in title_norm.split() if w not in ("the", "a", "an", "of", "in", "on", "to")}
+    src_is_inst = _is_instrumental_title(title)
+    src_has_kana = _contains_kana(title)
+    src_is_pure_zh = _is_already_zh(title) and not bool(_LATIN_WORD_RE.search(title or ""))
+    src_is_pure_en = not _contains_cjk(title) and not src_has_kana and bool(_LATIN_WORD_RE.search(title or ""))
+    album_has_kana = any(_contains_kana(str(t.get("name") or "")) for t in tracks)
+    pure_zh_vocal_candidates = [
+        t for t in tracks
+        if _is_already_zh(str(t.get("name") or ""))
+        and not _is_instrumental_title(str(t.get("name") or ""))
+        and not _LATIN_WORD_RE.search(str(t.get("name") or ""))
+    ]
+    inst_candidates = [t for t in tracks if _is_instrumental_title(str(t.get("name") or ""))]
     best_item: Optional[Dict[str, Any]] = None
     best_score = 0
 
@@ -784,6 +1064,10 @@ def _match_track_in_album(
         ne_name = str(item.get("name") or "").strip()
         if not ne_name:
             continue
+        cand_is_inst = _is_instrumental_title(ne_name)
+        if src_is_inst != cand_is_inst:
+            continue
+
         ne_norm = _normalize_text(ne_name)
         ne_no = int(item.get("no") or 0)
         ne_dur = int(item.get("duration_sec") or 0)
@@ -796,16 +1080,48 @@ def _match_track_in_album(
         dur_diff = abs(ne_dur - duration) if (duration and ne_dur) else None
 
         # 安全校验：
-        # 1) 英文原名或核心实词明确包含在网易云双语曲名中，且时长无严重冲突
+        # 1) 原曲名或核心实词明确包含在目标曲名中，且时长无严重冲突
         # 2) 去语言后缀的主标题命中且曲号一致、时长差 <= 4s
-        # 3) 纯中文或伴奏等非英文对应曲名，要求曲号严格一致且时长误差 <= 4s
+        # 3) 多语种 EP 曲序互换兼容（如海外版 Track 2 日语原名对应国内版唯一纯中文译名曲目）
+        # 4) 纯中文或伴奏对应曲名，要求曲号一致（或 EP 唯一伴奏）且时长误差 <= 4s
         if english_hit or fuzzy_words_hit:
             if dur_diff is not None and dur_diff > 6:
                 continue
             score = (100 if english_hit else 90) + (20 if no_hit else 0) + (10 if _contains_cjk(ne_name) else 0)
-        elif base_english_hit and no_hit and (dur_diff is None or dur_diff <= 4):
-            score = 92 + (10 if _contains_cjk(ne_name) else 0)
-        elif no_hit and dur_diff is not None and dur_diff <= 4 and _contains_cjk(ne_name):
+            if src_is_pure_zh:
+                if any(tag in ne_name for tag in ("中文版", "国语")):
+                    score += 35
+                elif any(tag in ne_name for tag in ("英文版", "日文版", "韩文版")):
+                    score -= 35
+            elif src_is_pure_en and "英文版" in ne_name:
+                score += 25
+        elif base_english_hit and (no_hit or len(base_title_norm) >= 6) and (dur_diff is None or dur_diff <= 4):
+            score = (92 if no_hit else 89) + (10 if _contains_cjk(ne_name) else 0)
+        elif (
+            src_has_kana
+            and not album_has_kana
+            and len(tracks) <= 6
+            and len(pure_zh_vocal_candidates) == 1
+            and item is pure_zh_vocal_candidates[0]
+            and (dur_diff is None or dur_diff <= 4)
+        ):
+            score = 88
+        elif (
+            src_is_inst
+            and len(tracks) <= 6
+            and len(inst_candidates) == 1
+            and item is inst_candidates[0]
+            and _contains_cjk(ne_name)
+            and (dur_diff is None or dur_diff <= 4)
+        ):
+            score = 87 + (2 if no_hit else 0)
+        elif (
+            no_hit
+            and dur_diff is not None
+            and dur_diff <= 4
+            and _contains_cjk(ne_name)
+            and not (src_has_kana and not _contains_kana(ne_name))
+        ):
             score = 85
         else:
             continue
@@ -826,8 +1142,8 @@ def match_netease_single(
     """
     针对无专辑信息或专辑未命中的散装单曲，通过网易云单曲搜索做严格防翻唱交叉匹配。
     """
-    primary_artist = _extract_primary_artist(artist)
-    if not title or not primary_artist:
+    search_artist = _pick_search_artist(artist)
+    if not title or not search_artist:
         return None
 
     proxies = {"http": proxy, "https": proxy} if proxy else None
@@ -835,7 +1151,7 @@ def match_netease_single(
     src_has_cover = any(kw in title_norm for kw in ("cover", "remix", "live"))
 
     try:
-        data = _netease_search(f"{title} {primary_artist}".strip(), search_type=1, limit=10, proxies=proxies)
+        data = _netease_search(f"{title} {search_artist}".strip(), search_type=1, limit=10, proxies=proxies)
         if not data:
             return None
 
@@ -852,7 +1168,7 @@ def match_netease_single(
                 for a in (s.get("artists") or [])
                 if isinstance(a, dict) and a.get("name")
             ]
-            if not _artist_matches(primary_artist, s_artists):
+            if not _artist_matches(artist, s_artists):
                 continue
 
             s_norm = _normalize_text(s_name)
@@ -866,11 +1182,11 @@ def match_netease_single(
             if duration and s_dur_sec and abs(s_dur_sec - duration) > 3:
                 continue
 
-            if not _contains_cjk(s_name):
-                continue
-
             alb_obj = s.get("album") or {}
             alb_name = str(alb_obj.get("name") or "").strip()
+            if not (_contains_cjk(s_name) or _contains_cjk(alb_name)):
+                continue
+
             return {
                 "song_id": s.get("id"),
                 "album_id": alb_obj.get("id"),
@@ -901,13 +1217,16 @@ def enrich_track_zh_metadata(
     if orig_album and not track_info.get("search_album"):
         track_info["search_album"] = orig_album
 
-    # 曲名与专辑均已含中文时无需重复匹配
-    if _contains_cjk(orig_title) and (not orig_album or _contains_cjk(orig_album)):
+    # 曲名与专辑均已是中文命名（不含日文假名）时无需重复匹配
+    if _is_already_zh(orig_title) and (not orig_album or _is_already_zh(orig_album)):
         return track_info
 
     artist = str(track_info.get("artist") or "").strip()
     if not artist and isinstance(track_info.get("artists"), list):
         artist = ", ".join(str(a).strip() for a in track_info["artists"] if a)
+    album_artist = str(track_info.get("album_artist") or "").strip()
+    if album_artist and album_artist.lower() not in artist.lower():
+        artist = f"{artist}, {album_artist}" if artist else album_artist
     if not orig_title or not artist:
         return track_info
 
@@ -937,6 +1256,8 @@ def enrich_track_zh_metadata(
                 sample_title=orig_title,
                 duration=duration,
                 total_tracks=total_tracks,
+                track_number=track_number,
+                release_date=str(track_info.get("release_date") or "")[:10],
                 proxy=proxy,
             )
         if alb_detail:

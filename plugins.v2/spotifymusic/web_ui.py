@@ -11,9 +11,11 @@ def render_music_workbench_html(
     api_prefix: str = "/api/v1/plugin/SpotifyMusic",
     default_token: str = "",
     version: str = "",
+    ytdlp_version: str = "",
 ) -> str:
     """生成内嵌 Vue 3 与 TailwindCSS 的单页交互界面 HTML。"""
     ver_badge = f"v{version.lstrip('v')}" if version else "dev"
+    ytdlp_init = ytdlp_version or "未知"
     return f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -62,9 +64,18 @@ def render_music_workbench_html(
           <i class="fa-brands fa-spotify"></i>
         </div>
         <div>
-          <h1 class="text-xl font-bold tracking-tight text-white flex items-center gap-2">
+          <h1 class="text-xl font-bold tracking-tight text-white flex items-center gap-2 flex-wrap">
             Spotify 音乐搜索与订阅工作台
             <span class="text-xs font-normal px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">{ver_badge}</span>
+            <button
+              @click="upgradeYtdlp"
+              :disabled="upgradingYtdlp"
+              class="text-[11px] font-normal px-2.5 py-0.5 rounded-full bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 transition flex items-center gap-1"
+              title="点击在线升级运行环境中的 yt-dlp 至最新版本"
+            >
+              <i class="fa-solid fa-arrows-rotate" :class="{{ 'fa-spin': upgradingYtdlp }}"></i>
+              <span>yt-dlp: {{{{ ytdlpVersion }}}}</span>
+            </button>
           </h1>
           <p class="text-xs text-slate-400">高品质音频下载 • 元数据/歌词/封面打标 • 增量订阅管理</p>
         </div>
@@ -1442,6 +1453,27 @@ def render_music_workbench_html(
           }}
         }};
 
+        const ytdlpVersion = ref('{ytdlp_init}');
+        const upgradingYtdlp = ref(false);
+        const upgradeYtdlp = async () => {{
+          upgradingYtdlp.value = true;
+          try {{
+            const res = await request('/system/upgrade_ytdlp', {{ method: 'POST' }});
+            if (res && res.success) {{
+              if (res.data && res.data.version) {{
+                ytdlpVersion.value = res.data.version;
+              }}
+              showToast(res.message || 'yt-dlp 升级完成');
+            }} else {{
+              showToast((res && res.message) || 'yt-dlp 升级失败', 'error');
+            }}
+          }} catch (e) {{
+            showToast('升级 yt-dlp 失败: ' + e.message, 'error');
+          }} finally {{
+            upgradingYtdlp.value = false;
+          }}
+        }};
+
         const deleteTask = async (task) => {{
           if (!task || !task.id) return;
           const isPendingOrRunning = ['downloading', 'pending', 'delayed', 'matching', 'processing', 'tagging'].includes(task.status);
@@ -1640,6 +1672,9 @@ def render_music_workbench_html(
           saveToken,
           token,
           copyToken,
+          ytdlpVersion,
+          upgradingYtdlp,
+          upgradeYtdlp,
         }};
       }}
     }}).mount('#app');

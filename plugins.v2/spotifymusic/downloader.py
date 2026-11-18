@@ -50,7 +50,7 @@ from .lyrics import fetch_lyrics
 from .matcher import match_youtube_track
 
 _INVALID_FS_CHARS = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
-_DEFAULT_YT_CLIENTS = ['ios', 'android', 'web_embedded', 'mweb', 'tv']
+_DEFAULT_YT_CLIENTS = ['default', 'mweb', 'web_embedded']
 
 
 def sanitize_filename(text: str) -> str:
