@@ -134,7 +134,7 @@ class MusicDownloader:
         audio_bitrate: str = '320',
         download_lyrics: bool = True,
         embed_lyrics: bool = True,
-        save_lrc_file: bool = True,
+        save_lrc_file: bool = False,
         proxy: Optional[str] = None,
         cookie_file: Optional[str] = None,
         po_token: Optional[str] = None,
