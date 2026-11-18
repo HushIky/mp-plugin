@@ -37,7 +37,7 @@ class SpotifyMusic(_PluginBase):
     plugin_name = "Spotify音乐下载与订阅"
     plugin_desc = "支持 Spotify 链接解析、音乐搜索、歌单/艺术家增量订阅、元数据标签/封面/歌词内嵌与目录自动整理。"
     plugin_icon = "spotifymusic.png"
-    plugin_version = "1.1.18"
+    plugin_version = "1.1.19"
     plugin_label = "音乐管理"
     plugin_author = "local"
     plugin_order = 10
@@ -1156,7 +1156,10 @@ class SpotifyMusic(_PluginBase):
                             spotify_client_secret=self._spotify_client_secret or None,
                         )
                         album_tracks = album_ent.get("tracks") or []
+                        rel_date = str(rel.get("release_date") or album_ent.get("release_date") or "").strip()
                         for t in album_tracks:
+                            if rel_date and not t.get("release_date"):
+                                t["release_date"] = rel_date
                             t_id = t.get("spotify_id")
                             if (
                                 t_id

@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 import threading
 import time
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
@@ -150,6 +151,17 @@ def _netease_search(
         return None
 
 
+def _parse_publish_time(publish_time_ms: Any) -> str:
+    """将网易云毫秒级时间戳转换为 YYYY-MM-DD 发行日期字符串。"""
+    try:
+        ts = int(publish_time_ms or 0)
+        if ts > 0:
+            return datetime.fromtimestamp(ts / 1000.0, tz=timezone.utc).strftime("%Y-%m-%d")
+    except Exception:
+        pass
+    return ""
+
+
 def _fetch_netease_album_detail(album_id: int, proxies: Optional[Dict[str, str]] = None) -> Optional[Dict[str, Any]]:
     """拉取网易云专辑详情并提取标准化的专辑名与曲目列表。"""
     try:
@@ -191,9 +203,12 @@ def _fetch_netease_album_detail(album_id: int, proxies: Optional[Dict[str, str]]
                 "artists": s_artists,
             })
 
+        album_release_date = _parse_publish_time(album_obj.get("publishTime"))
+
         return {
             "id": album_id,
             "name": album_name,
+            "release_date": album_release_date,
             "tracks": parsed_tracks,
         }
     except Exception as e:
@@ -474,10 +489,12 @@ def match_netease_single(
             if not _contains_cjk(s_name):
                 continue
 
-            alb_name = str((s.get("album") or {}).get("name") or "").strip()
+            alb_obj = s.get("album") or {}
+            alb_name = str(alb_obj.get("name") or "").strip()
             return {
                 "title": s_name,
                 "album": alb_name,
+                "release_date": _parse_publish_time(alb_obj.get("publishTime")),
             }
     except Exception as e:
         logger.debug(f"检索网易云单曲异常 ({title}): {e}")
@@ -535,6 +552,8 @@ def enrich_track_zh_metadata(
                 track_info["album"] = alb_detail["name"]
             if matched_track_name:
                 track_info["title"] = matched_track_name
+            if not track_info.get("release_date") and not track_info.get("year") and alb_detail.get("release_date"):
+                track_info["release_date"] = alb_detail["release_date"]
             if track_info.get("title") != orig_title or track_info.get("album") != orig_album:
                 logger.info(
                     f"[中文元数据匹配] 专辑对齐成功: '{orig_title}' -> '{track_info.get('title')}' "
@@ -553,6 +572,8 @@ def enrich_track_zh_metadata(
         track_info["title"] = single_res["title"]
         if single_res.get("album") and _contains_cjk(single_res["album"]):
             track_info["album"] = single_res["album"]
+        if not track_info.get("release_date") and not track_info.get("year") and single_res.get("release_date"):
+            track_info["release_date"] = single_res["release_date"]
         logger.info(
             f"[中文元数据匹配] 单曲对齐成功: '{orig_title}' -> '{track_info.get('title')}'"
         )

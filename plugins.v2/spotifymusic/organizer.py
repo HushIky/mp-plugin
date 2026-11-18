@@ -79,8 +79,10 @@ def build_relative_path(template: str, track_info: Dict[str, Any], ext: str) -> 
     all_artists = sanitize_path_part(all_artists_raw or primary_artist)
 
     album = sanitize_path_part(str(track_info.get("album") or "Unknown Album"))
-    release_date = str(track_info.get("release_date") or "")
-    year = release_date[:4] if len(release_date) >= 4 else "Unknown Year"
+    release_date = str(track_info.get("release_date") or "").strip()
+    raw_year = str(track_info.get("year") or "").strip()
+    year_match = re.search(r"(\d{4})", release_date) or re.search(r"(\d{4})", raw_year)
+    year = year_match.group(1) if year_match else ""
     track_num = int(track_info.get("track_number") or 1)
     disc_num = int(track_info.get("disc_number") or 1)
     ext_clean = ext.lstrip('.')
@@ -96,6 +98,12 @@ def build_relative_path(template: str, track_info: Dict[str, Any], ext: str) -> 
     tpl = tpl.replace("{disc_number}", str(disc_num))
     tpl = tpl.replace("{ext}", ext_clean)
     tpl = tpl.replace("{output-ext}", ext_clean)
+
+    # 当缺失发行年份时，优雅移除模板中的 ({year}) / [{year}] / - {year} 等空括号占位，避免出现 (Unknown Year)
+    if not year:
+        tpl = re.sub(r"\s*[\(\[\{（【]\s*\{year\}\s*[\)\]\}）】]", "", tpl)
+        tpl = re.sub(r"\s*-\s*\{year\}", "", tpl)
+        tpl = tpl.replace("{year}", "")
 
     # 渲染其余字符串变量
     try:
