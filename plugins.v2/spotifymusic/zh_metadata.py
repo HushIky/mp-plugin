@@ -38,6 +38,8 @@ _KUGOU_HEADERS = {
 # 专辑级交叉匹配缓存：key=(album_lower, primary_artist_lower) -> dict 或 None（表示已查过未命中）
 _ALBUM_CACHE: Dict[Tuple[str, str], Optional[Dict[str, Any]]] = {}
 _KUGOU_ALBUM_CACHE: Dict[Tuple[str, str], Optional[Dict[str, Any]]] = {}
+_PROBE_ALBUM_CACHE: Dict[Tuple[str, str], Optional[Dict[str, Any]]] = {}
+_DETAIL_BY_ID_CACHE: Dict[Tuple[str, int], Optional[Dict[str, Any]]] = {}
 # 歌手近期专辑列表缓存：key=artist_lower -> list[dict]
 _ARTIST_ALBUMS_CACHE: Dict[str, List[Dict[str, Any]]] = {}
 _KUGOU_ARTIST_ALBUMS_CACHE: Dict[str, List[Dict[str, Any]]] = {}
@@ -124,6 +126,8 @@ def clear_album_cache() -> None:
     with _CACHE_LOCK:
         _ALBUM_CACHE.clear()
         _KUGOU_ALBUM_CACHE.clear()
+        _PROBE_ALBUM_CACHE.clear()
+        _DETAIL_BY_ID_CACHE.clear()
         _ARTIST_ALBUMS_CACHE.clear()
         _KUGOU_ARTIST_ALBUMS_CACHE.clear()
         _SEARCH_COOLDOWN_UNTIL = 0.0
@@ -617,6 +621,148 @@ def match_kugou_album(
     return result
 
 
+def _get_cached_album_detail(
+    source: str,
+    album_id: int,
+    fallback_name: str = "",
+    fallback_release_date: str = "",
+    proxies: Optional[Dict[str, str]] = None,
+) -> Optional[Dict[str, Any]]:
+    """按平台与专辑 ID 缓存专辑详情，避免曲目反推探测时重复拉取同一张专辑。"""
+    key = (source, int(album_id))
+    with _CACHE_LOCK:
+        if key in _DETAIL_BY_ID_CACHE:
+            return _DETAIL_BY_ID_CACHE[key]
+    if source == "netease":
+        detail = _fetch_netease_album_detail(int(album_id), proxies=proxies)
+    else:
+        detail = _fetch_kugou_album_detail(
+            int(album_id),
+            fallback_name=fallback_name,
+            fallback_release_date=fallback_release_date,
+            proxies=proxies,
+        )
+    with _CACHE_LOCK:
+        _DETAIL_BY_ID_CACHE[key] = detail
+    return detail
+
+
+def _probe_pure_zh_album_by_track(
+    album: str,
+    artist: str,
+    sample_title: str,
+    duration: int = 0,
+    total_tracks: int = 0,
+    proxy: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """
+    针对国内平台采用纯中文命名（不含英文原专辑名，如《崩坏3-于未来彼端回眸》对应
+    《Looking Back from Beyond the Future》）的原声带：
+    从该艺术家的近期中文专辑中筛选曲目数相近的候选，通过首曲英文原名精确命中反推整张专辑并缓存，
+    全程仅使用免限流 GET 详情接口，不依赖易 405 限流的搜索接口。
+    """
+    clean_alb = _clean_album_title(album)
+    primary_artist = _extract_primary_artist(artist)
+    title_norm = _normalize_text(_TRACK_LANG_SUFFIX_RE.sub("", sample_title or ""))
+    if not clean_alb or not primary_artist or len(title_norm) < 5:
+        return None
+
+    cache_key = (clean_alb.lower(), primary_artist.lower())
+    with _CACHE_LOCK:
+        if cache_key in _PROBE_ALBUM_CACHE:
+            return _PROBE_ALBUM_CACHE[cache_key]
+
+    proxies = {"http": proxy, "https": proxy} if proxy else None
+    src_part = _extract_part_number(clean_alb)
+    core_segment = clean_alb.rsplit(" - ", 1)[-1].strip() if " - " in clean_alb else clean_alb
+    base_no_part_norm = _normalize_text(_PART_RE.sub("", core_segment))
+
+    def _collect_candidates(raw_albums: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        filtered: List[Tuple[int, Dict[str, Any]]] = []
+        for cand in raw_albums:
+            if not isinstance(cand, dict) or not cand.get("id"):
+                continue
+            cand_name = str(cand.get("name") or "").strip()
+            if not _contains_cjk(cand_name):
+                continue
+            cand_part = _extract_part_number(cand_name)
+            if src_part and cand_part and src_part != cand_part:
+                continue
+            cand_norm = _normalize_text(cand_name)
+            # 兼容海外按 Vol 分卷而国内合入同一总集专辑的情况（如 Footprints of the Traveler, Vol. 5 -> 原神-流星的轨迹 Footprints of the Traveler）
+            is_umbrella_series = bool(
+                src_part and not cand_part and len(base_no_part_norm) >= 6 and base_no_part_norm in cand_norm
+            )
+            if src_part and not cand_part and not is_umbrella_series:
+                continue
+            cand_size = int(cand.get("size") or 0)
+            if is_umbrella_series:
+                diff = -10
+            elif total_tracks and cand_size:
+                diff = abs(cand_size - total_tracks)
+                if diff > max(3, int(total_tracks * 0.25)):
+                    continue
+            else:
+                diff = 50
+            filtered.append((diff, cand))
+        filtered.sort(key=lambda pair: pair[0])
+        return [c for _, c in filtered[:6]]
+
+    def _detail_has_exact_track(detail: Optional[Dict[str, Any]]) -> bool:
+        if not detail:
+            return False
+        for item in detail.get("tracks") or []:
+            ne_name = str(item.get("name") or "")
+            if not _contains_cjk(ne_name):
+                continue
+            ne_norm = _normalize_text(ne_name)
+            if title_norm not in ne_norm:
+                continue
+            ne_dur = int(item.get("duration_sec") or 0)
+            if duration and ne_dur and abs(ne_dur - duration) > 5:
+                continue
+            return True
+        return False
+
+    matched_detail: Optional[Dict[str, Any]] = None
+
+    # 1. 先探测网易云艺术家近期纯中文候选专辑
+    for art_name in _split_artists(artist):
+        for cand in _collect_candidates(_get_artist_recent_albums(art_name, proxies=proxies)):
+            detail = _get_cached_album_detail("netease", int(cand["id"]), proxies=proxies)
+            if _detail_has_exact_track(detail):
+                matched_detail = detail
+                break
+        if matched_detail:
+            break
+
+    # 2. 再探测酷狗/TME 艺术家近期纯中文候选专辑
+    if not matched_detail:
+        for art_name in _split_artists(artist):
+            for cand in _collect_candidates(_get_kugou_artist_recent_albums(art_name, proxies=proxies)):
+                detail = _get_cached_album_detail(
+                    "kugou",
+                    int(cand["id"]),
+                    fallback_name=str(cand.get("name") or ""),
+                    fallback_release_date=str(cand.get("release_date") or ""),
+                    proxies=proxies,
+                )
+                if _detail_has_exact_track(detail):
+                    matched_detail = detail
+                    break
+            if matched_detail:
+                break
+
+    with _CACHE_LOCK:
+        _PROBE_ALBUM_CACHE[cache_key] = matched_detail
+        if matched_detail:
+            if matched_detail.get("source") == "kugou":
+                _KUGOU_ALBUM_CACHE[cache_key] = matched_detail
+            else:
+                _ALBUM_CACHE[cache_key] = matched_detail
+    return matched_detail
+
+
 def _match_track_in_album(
     album_detail: Dict[str, Any],
     title: str,
@@ -727,6 +873,7 @@ def match_netease_single(
             alb_name = str(alb_obj.get("name") or "").strip()
             return {
                 "song_id": s.get("id"),
+                "album_id": alb_obj.get("id"),
                 "title": s_name,
                 "album": alb_name,
                 "release_date": _parse_publish_time(alb_obj.get("publishTime")),
@@ -783,6 +930,15 @@ def enrich_track_zh_metadata(
                 total_tracks=total_tracks,
                 proxy=proxy,
             )
+        if not alb_detail:
+            alb_detail = _probe_pure_zh_album_by_track(
+                album=orig_album,
+                artist=artist,
+                sample_title=orig_title,
+                duration=duration,
+                total_tracks=total_tracks,
+                proxy=proxy,
+            )
         if alb_detail:
             matched_item = _match_track_in_album(
                 album_detail=alb_detail,
@@ -824,6 +980,16 @@ def enrich_track_zh_metadata(
             track_info["album"] = single_res["album"]
         if not track_info.get("release_date") and not track_info.get("year") and single_res.get("release_date"):
             track_info["release_date"] = single_res["release_date"]
+        # 单曲命中后若带有网易云官方专辑 ID，顺带提升缓存整张专辑，避免同专辑后续曲目频繁请求搜索接口触发 405
+        if orig_album and single_res.get("album_id"):
+            clean_alb = _clean_album_title(orig_album)
+            primary_artist = _extract_primary_artist(artist)
+            if clean_alb and primary_artist:
+                proxies = {"http": proxy, "https": proxy} if proxy else None
+                promoted = _get_cached_album_detail("netease", int(single_res["album_id"]), proxies=proxies)
+                if promoted and len(promoted.get("tracks") or []) > 1:
+                    with _CACHE_LOCK:
+                        _ALBUM_CACHE[(clean_alb.lower(), primary_artist.lower())] = promoted
         logger.info(
             f"[中文元数据匹配] 单曲对齐成功: '{orig_title}' -> '{track_info.get('title')}'"
         )
